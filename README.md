@@ -1,0 +1,1 @@
+Simple automatic source control which stores files locally
