@@ -8,6 +8,7 @@
 #include <string>
 #include <regex>
 #include <filesystem>
+#include <sstream>
 
 namespace std
 {
@@ -16,18 +17,26 @@ namespace std
 
 struct BackupProject 
 {
-    std::wstring	title;
-    std::wstring	rootPath;
-	std::wstring	backupPath;
-	std::wstring	includePaths;
-	std::wstring	excludePaths;
-    bool			recurseSubfolders;
+    std::wstring				title;
+    std::wstring				rootPath;
+	std::wstring				backupPath;
+	std::vector<std::wstring>	includePaths;
+	std::vector<std::wstring>	excludePaths;
+
+	std::vector<std::wregex>	includeRegex;
+	std::vector<std::wregex>	excludeRegex;
+
+	void SetIncludeFilter(const std::wstring& filter);
+	void SetExcludeFilter(const std::wstring& filter);
+	void UpdateRegex();
+	bool MatchesFilters(const std::wstring& filename) const;
 };
 
 HINSTANCE					g_hInst;
 HWND						g_hWND;
 HWND						g_hTreeView;
-HWND						g_hPropertyView;
+HWND						g_hPropertyViewLabels;
+HWND						g_hPropertyViewValues;
 HWND						g_hFileView;
 HWND						g_hHorizontalSplitter;
 HWND						g_hVerticalSplitter;
@@ -38,16 +47,29 @@ bool						g_dragSplitterX = false;
 bool						g_dragSplitterY = false;
 int							g_splitterHalfWidth = 5;
 BackupProject*				g_currentProject = nullptr;
+bool						g_pauseTreeViewSelections = false;
+
+enum UILabels
+{
+	UI_Title,
+	UI_RootPath,
+	UI_BackupPath,
+	UI_Include,
+	UI_Exclude,
+};
 
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
-
 void InitUI();
 void UpdateLayout();
 void PopulateProjectsTreeView();
-void PopulateTreeNode(HTREEITEM parent, const std::wstring& path);
+void PopulateTreeNode(HTREEITEM parent, const std::wstring& path, const BackupProject& project);
 void ShowProjectDetails();
 void LoadSettings();
 void SaveSettings();
+std::wstring JoinPaths(const std::vector<std::wstring>& paths);
+void SplitPaths(const std::wstring& str, std::vector<std::wstring>& paths);
+bool LoadBackupProject(const std::wstring& line, BackupProject& project);
+std::wstring SaveBackupProject(const BackupProject& project);
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 {
@@ -92,19 +114,21 @@ void InitUI()
     
 	g_hTreeView = CreateWindowEx(0, WC_TREEVIEW, L"", WS_VISIBLE | WS_CHILD | WS_BORDER | TVS_HASLINES | TVS_LINESATROOT | TVS_HASBUTTONS | TVS_SHOWSELALWAYS, 0, 0, 300, 600, g_hWND, (HMENU)1, g_hInst, nullptr);
     
-	g_hPropertyView = CreateWindowEx(0, WC_LISTVIEW, L"", WS_VISIBLE | WS_CHILD | WS_BORDER | LVS_REPORT, 300, 0, 500, 600, g_hWND, (HMENU)2, g_hInst, nullptr);
+	g_hPropertyViewLabels = CreateWindowEx(0, WC_LISTVIEW, L"", WS_VISIBLE | WS_CHILD | WS_BORDER | LVS_REPORT, 300, 0, 500, 600, g_hWND, (HMENU)2, g_hInst, nullptr);
+	g_hPropertyViewValues = CreateWindowEx(0, WC_LISTVIEW, L"", WS_VISIBLE | WS_CHILD | WS_BORDER | LVS_REPORT | LVS_EDITLABELS, 300, 0, 500, 600, g_hWND, (HMENU)2, g_hInst, nullptr);
 	{
-		ListView_SetExtendedListViewStyle(g_hPropertyView, LVS_EX_FULLROWSELECT);
+		ListView_SetExtendedListViewStyle(g_hPropertyViewLabels, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
+		ListView_SetExtendedListViewStyle(g_hPropertyViewValues, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
 
 		LVCOLUMN lvc = { LVCF_TEXT | LVCF_WIDTH, 0, 0, L"" };
 
-		lvc.cx = 150;
+		lvc.cx = 120;
 		lvc.pszText = L"Property";
-		ListView_InsertColumn(g_hPropertyView, 0, &lvc);
+		ListView_InsertColumn(g_hPropertyViewLabels, 0, &lvc);
 
 		lvc.cx = 350;
 		lvc.pszText = L"Value";
-		ListView_InsertColumn(g_hPropertyView, 1, &lvc);
+		ListView_InsertColumn(g_hPropertyViewValues, 0, &lvc);
 	}
 
 	g_hFileView = CreateWindowEx(0, WC_LISTVIEW, L"", WS_VISIBLE | WS_CHILD | WS_BORDER | LVS_REPORT, 300, 0, 500, 600, g_hWND, (HMENU)3, g_hInst, nullptr);
@@ -137,7 +161,8 @@ void UpdateLayout()
 	uint32_t windowHeight = clientRect.bottom - clientRect.top;
 
 	MoveWindow(g_hTreeView,		0, 0, (int)(windowWidth * g_ProjectViewWidthF-g_splitterHalfWidth), (int)(windowHeight * g_ProjectViewHeightF - g_splitterHalfWidth), FALSE);
-	MoveWindow(g_hPropertyView, 0, (int)(windowHeight * g_ProjectViewHeightF + g_splitterHalfWidth), (int)(windowWidth * g_ProjectViewWidthF - g_splitterHalfWidth), (int)(windowHeight * (1.0f - g_ProjectViewHeightF) - g_splitterHalfWidth), FALSE);
+	MoveWindow(g_hPropertyViewLabels, 0, (int)(windowHeight * g_ProjectViewHeightF + g_splitterHalfWidth), 120, (int)(windowHeight * (1.0f - g_ProjectViewHeightF) - g_splitterHalfWidth), FALSE);
+	MoveWindow(g_hPropertyViewValues, 120, (int)(windowHeight * g_ProjectViewHeightF + g_splitterHalfWidth), (int)((windowWidth * g_ProjectViewWidthF - g_splitterHalfWidth) - 120), (int)(windowHeight * (1.0f - g_ProjectViewHeightF) - g_splitterHalfWidth), FALSE);
 	MoveWindow(g_hFileView, (int)(windowWidth * g_ProjectViewWidthF + g_splitterHalfWidth), 0, (int)(windowWidth * (1.0f - g_ProjectViewWidthF) - g_splitterHalfWidth), windowHeight, FALSE);
 	MoveWindow(g_hHorizontalSplitter, 0, (int)(windowHeight * g_ProjectViewHeightF - g_splitterHalfWidth), (int)(windowWidth * g_ProjectViewWidthF - g_splitterHalfWidth), g_splitterHalfWidth*2, FALSE);
 	MoveWindow(g_hVerticalSplitter, (int)(windowWidth * g_ProjectViewWidthF - g_splitterHalfWidth), 0, g_splitterHalfWidth*2, windowHeight, FALSE);
@@ -293,18 +318,95 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
 		case WM_NOTIFY:
 		{
-			LPNMHDR pNMHDR = (LPNMHDR)lParam;
+			LPNMHDR pNotifyHeader = (LPNMHDR)lParam;
 
-			if (pNMHDR->hwndFrom == g_hTreeView && pNMHDR->code == TVN_SELCHANGED)
+			if (pNotifyHeader->hwndFrom == g_hTreeView && pNotifyHeader->code == TVN_SELCHANGED)
 			{
-				LPNMTREEVIEW pNMTV = (LPNMTREEVIEW)lParam;
-
-				uint32_t projectIndex = (int)pNMTV->itemNew.lParam;
-
-				if (projectIndex < g_backupProjects.size())
+				if (!g_pauseTreeViewSelections)
 				{
-					g_currentProject = &g_backupProjects[projectIndex];
+					LPNMTREEVIEW pNMTV = (LPNMTREEVIEW)lParam;
+
+					uint32_t projectIndex = (int)pNMTV->itemNew.lParam;
+
+					if (projectIndex < g_backupProjects.size())
+					{
+						g_currentProject = &g_backupProjects[projectIndex];
+						ShowProjectDetails();
+					}
+				}
+			}
+			else if (pNotifyHeader->hwndFrom == g_hPropertyViewValues)
+			{
+				if (pNotifyHeader->code == NM_DBLCLK)
+				{
+					NMLISTVIEW* pnmv = (NMLISTVIEW*)lParam;
+					ListView_EditLabel(g_hPropertyViewValues, pnmv->iItem);
+				}
+				else if (pNotifyHeader->code == LVN_ENDLABELEDIT)
+				{
+					NMLVDISPINFO* pDispInfo = (NMLVDISPINFO*)lParam;
+
+					if (pDispInfo->item.pszText)
+					{
+						ListView_SetItemText(g_hPropertyViewValues, pDispInfo->item.iItem, 0, pDispInfo->item.pszText);
+
+						switch (pDispInfo->item.iItem)
+						{
+							case UI_Title:
+							{ 
+								g_currentProject->title = pDispInfo->item.pszText;
+								ListView_SetItemText(g_hPropertyViewValues, pDispInfo->item.iItem, 0, (LPWSTR)g_currentProject->title.c_str());
+								break;
+							}
+
+							case UI_RootPath:
+							{
+								g_currentProject->rootPath = pDispInfo->item.pszText;
+								ListView_SetItemText(g_hPropertyViewValues, pDispInfo->item.iItem, 0, (LPWSTR)g_currentProject->rootPath.c_str());		
+								break;
+							}
+
+							case UI_BackupPath:
+							{
+								g_currentProject->backupPath = pDispInfo->item.pszText;
+								ListView_SetItemText(g_hPropertyViewValues, pDispInfo->item.iItem, 0, (LPWSTR)g_currentProject->backupPath.c_str());
+								break;
+							}
+
+							case UI_Include:
+							{ 
+								g_currentProject->SetIncludeFilter(pDispInfo->item.pszText); 
+								std::wstring temp = JoinPaths(g_currentProject->includePaths); 
+								ListView_SetItemText(g_hPropertyViewValues, pDispInfo->item.iItem, 0, (LPWSTR)temp.c_str()); 
+								PopulateProjectsTreeView();
+								break;
+							}
+
+							case UI_Exclude:
+							{
+								g_currentProject->SetExcludeFilter(pDispInfo->item.pszText);
+								std::wstring temp = JoinPaths(g_currentProject->excludePaths);
+								ListView_SetItemText(g_hPropertyViewValues, pDispInfo->item.iItem, 0, (LPWSTR)temp.c_str());
+								PopulateProjectsTreeView();
+								break;
+							}
+						}
+					}
+				}
+			}
+
+			break;
+		}
+
+		case WM_KEYUP:
+		{
+			switch (wParam)
+			{
+				case VK_F5:
+				{
+					PopulateProjectsTreeView();
 					ShowProjectDetails();
+					break;
 				}
 			}
 
@@ -320,6 +422,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam)
 
 void PopulateProjectsTreeView()
 {
+	SendMessage(g_hTreeView, WM_SETREDRAW, FALSE, 0);
+	g_pauseTreeViewSelections = true;
+
+	TreeView_DeleteAllItems(g_hTreeView);
+
+	HTREEITEM currentProjectTreeItem = NULL;
+
 	for (unsigned i=0; i!=g_backupProjects.size(); ++i) 
 	{
 		const BackupProject& project = g_backupProjects[i];
@@ -336,16 +445,30 @@ void PopulateProjectsTreeView()
 
 		HTREEITEM hTreeItem = TreeView_InsertItem(g_hTreeView, &tvis);
 
-		PopulateTreeNode(hTreeItem, project.rootPath);
+		PopulateTreeNode(hTreeItem, project.rootPath, project);
+
+		if (g_currentProject == &project)
+		{
+			currentProjectTreeItem = hTreeItem;
+		}
 	}
+
+	TreeView_Expand(g_hTreeView, currentProjectTreeItem, TVE_EXPAND);
+	TreeView_EnsureVisible(g_hTreeView, currentProjectTreeItem);
+	SendMessage(g_hTreeView, WM_SETREDRAW, TRUE, 0);
+	InvalidateRect(g_hTreeView, NULL, TRUE);
+
+	g_pauseTreeViewSelections = false;
+
+	TreeView_SelectItem(g_hTreeView, currentProjectTreeItem);
 }
 
-void PopulateTreeNode(HTREEITEM parent, const std::wstring& path)
+void PopulateTreeNode(HTREEITEM parent, const std::wstring& path, const BackupProject& project)
 {
 	if (!std::fs::exists(path))
 	{
 		TVINSERTSTRUCT tvis = {};
-		tvis.hParent		= TVI_ROOT;
+		tvis.hParent		= parent;
 		tvis.hInsertAfter	= TVI_LAST;
 		tvis.item.mask		= TVIF_TEXT | TVIF_PARAM;
 		tvis.item.pszText	= L"Missing Path!";
@@ -357,6 +480,9 @@ void PopulateTreeNode(HTREEITEM parent, const std::wstring& path)
 	for (const std::fs::directory_entry& entry : std::fs::directory_iterator(path))
 	{
 		std::fs::path relativePath = std::fs::relative(entry.path(), path);
+
+		if (!project.MatchesFilters(relativePath))
+			continue;
 
 		WCHAR buffer[256];
 		swprintf_s(buffer, 256, L"%s", relativePath.c_str());
@@ -382,7 +508,8 @@ void PopulateTreeNode(HTREEITEM parent, const std::wstring& path)
 
 void ShowProjectDetails()
 {
-	ListView_DeleteAllItems(g_hPropertyView);
+	ListView_DeleteAllItems(g_hPropertyViewLabels);
+	ListView_DeleteAllItems(g_hPropertyViewValues);
     
 	if (g_currentProject == nullptr)
 		return;
@@ -390,52 +517,198 @@ void ShowProjectDetails()
 	LVITEM lvi = {};
 	lvi.mask = LVIF_TEXT;
     
-	lvi.pszText = L"Title";
-	lvi.iItem = 0;
-	ListView_InsertItem(g_hPropertyView, &lvi);
-	lvi.pszText = (LPWSTR)g_currentProject->title.c_str();
-	lvi.iSubItem = 1;
-	ListView_SetItem(g_hPropertyView, &lvi);
+	lvi.iItem = UI_Title;
+	lvi.iSubItem = 0;
+	{
+		lvi.pszText = L"Title";
+		ListView_InsertItem(g_hPropertyViewLabels, &lvi);
+
+		lvi.pszText = (LPWSTR)g_currentProject->title.c_str();
+		ListView_InsertItem(g_hPropertyViewValues, &lvi);
+	}
     
-	lvi.pszText = L"Root Path";
-	lvi.iItem = 1;
-	lvi.iSubItem = 0;
-	ListView_InsertItem(g_hPropertyView, &lvi);
-	lvi.pszText = (LPWSTR)g_currentProject->rootPath.c_str();
-	lvi.iSubItem = 1;
-	ListView_SetItem(g_hPropertyView, &lvi);
+	lvi.iItem = UI_RootPath;
+	{
+		lvi.pszText = L"Root Path";
+		ListView_InsertItem(g_hPropertyViewLabels, &lvi);
+	
+		lvi.pszText = (LPWSTR)g_currentProject->rootPath.c_str();
+		ListView_InsertItem(g_hPropertyViewValues, &lvi);
+	}
     
-	lvi.pszText = L"Backup Path";
-	lvi.iItem = 1;
-	lvi.iSubItem = 0;
-	ListView_InsertItem(g_hPropertyView, &lvi);
-	lvi.pszText = (LPWSTR)g_currentProject->backupPath.c_str();
-	lvi.iSubItem = 1;
-	ListView_SetItem(g_hPropertyView, &lvi);
+	lvi.iItem = UI_BackupPath;
+	{
+		lvi.pszText = L"Backup Path";
+		ListView_InsertItem(g_hPropertyViewLabels, &lvi);
 
-	lvi.pszText = L"Include";
-	lvi.iItem = 2;
-	lvi.iSubItem = 0;
-	ListView_InsertItem(g_hPropertyView, &lvi);
-	lvi.pszText = (LPWSTR)g_currentProject->includePaths.c_str();
-	lvi.iSubItem = 1;
-	ListView_SetItem(g_hPropertyView, &lvi);
+		lvi.pszText = (LPWSTR)g_currentProject->backupPath.c_str();
+		ListView_InsertItem(g_hPropertyViewValues, &lvi);
+	}
 
-	lvi.pszText = L"Exclude";
-	lvi.iItem = 3;
-	lvi.iSubItem = 0;
-	ListView_InsertItem(g_hPropertyView, &lvi);
-	lvi.pszText = (LPWSTR)g_currentProject->excludePaths.c_str();
-	lvi.iSubItem = 1;
-	ListView_SetItem(g_hPropertyView, &lvi);
+	lvi.iItem = UI_Include;
+	{
+		lvi.pszText = L"Include";
+		ListView_InsertItem(g_hPropertyViewLabels, &lvi);
 
-	lvi.pszText = L"Recurse Subfolders";
-	lvi.iItem = 4;
-	lvi.iSubItem = 0;
-	ListView_InsertItem(g_hPropertyView, &lvi);
-	lvi.pszText = g_currentProject->recurseSubfolders ? L"Yes" : L"No";
-	lvi.iSubItem = 1;
-	ListView_SetItem(g_hPropertyView, &lvi);
+		std::wstring temp = JoinPaths(g_currentProject->includePaths);
+		lvi.pszText = (LPWSTR)temp.c_str();
+		ListView_InsertItem(g_hPropertyViewValues, &lvi);
+	}
+
+	lvi.iItem = UI_Exclude;
+	{
+		lvi.pszText = L"Exclude";
+		ListView_InsertItem(g_hPropertyViewLabels, &lvi);
+
+		std::wstring temp = JoinPaths(g_currentProject->excludePaths);
+		lvi.pszText = (LPWSTR)temp.c_str();
+		ListView_InsertItem(g_hPropertyViewValues, &lvi);
+	}
+}
+
+void BackupProject::SetIncludeFilter(const std::wstring& filter)
+{
+	includePaths.clear();
+
+	SplitPaths(filter, includePaths);
+
+	UpdateRegex(); 
+}
+
+void BackupProject::SetExcludeFilter(const std::wstring& filter)
+{
+	excludePaths.clear();
+	
+	SplitPaths(filter, excludePaths);
+
+	UpdateRegex(); 
+}
+
+void BackupProject::UpdateRegex()
+{
+	auto WildcardToRegex = [](const std::wstring& wildcard)->std::wregex 
+	{
+		std::wstring regexPattern;
+
+		for (wchar_t c : wildcard)
+		{
+			switch (c)
+			{
+				case L'*':	regexPattern += L".*";		break;	// Convert * to .*
+				case L'?':	regexPattern += L".";		break;	// Convert ? to .
+				case L'\\': regexPattern += L"\\\\\\";	break;	// Escape backslashes
+				case L'.':	regexPattern += L"\\.";		break;	// Escape dots
+				default:	regexPattern += c;			break;
+			}
+		}
+
+		//// Match end of string
+		//regexPattern += L"$";
+
+		return std::wregex(regexPattern, std::regex_constants::icase);
+	};
+
+	includeRegex.clear();
+	for (const std::wstring& str : includePaths)
+	{
+		includeRegex.push_back( WildcardToRegex(str) );
+	}
+
+	excludeRegex.clear();
+	for (const std::wstring& str : excludePaths)
+	{
+		excludeRegex.push_back( WildcardToRegex(str) );
+	}
+}
+
+bool BackupProject::MatchesFilters(const std::wstring& filename) const
+{
+	bool included = false;
+
+	for (const auto& filter : includeRegex)
+	{
+		if (std::regex_match(filename, filter))
+		{
+			included = true;
+			break;
+		}
+	}
+
+	if (included)
+	{
+		for (const auto& filter : excludeRegex)
+		{
+			if (std::regex_match(filename, filter))
+			{
+				included = false;
+				break;
+			}
+		}
+	}
+
+	return included;
+}
+
+std::wstring JoinPaths(const std::vector<std::wstring>& paths) 
+{
+	std::wstringstream ss;
+
+	for (size_t i = 0; i < paths.size(); ++i) 
+	{
+		if (i > 0) ss << L";";
+		ss << paths[i];
+	}
+
+	return ss.str();
+}
+
+void SplitPaths(const std::wstring& str, std::vector<std::wstring>& paths) 
+{
+	const std::wstring delimiters = L";, ";
+
+	auto AddToken = [&](const std::wstring& token)
+	{
+		if (token.empty())
+			return;
+
+		size_t start = 0;
+		size_t end = token.size();
+
+		while (iswspace(token[start]) && start < end)
+		{
+			++start;
+		}
+
+		while (iswspace(token[end-1]) && end>start)
+		{
+			--end;
+		}
+
+		if (end>start) 
+		{
+			paths.push_back( token.substr(start, end - start) );
+		}
+	};
+
+	size_t start = 0;
+	size_t end = str.find_first_of(delimiters, start);
+
+	while (end != std::string::npos)
+	{
+		// Avoid empty tokens
+		if (end > start) 
+		{
+			AddToken(str.substr(start, end - start));
+		}
+
+		start = end + 1;
+		end = str.find_first_of(delimiters, start);
+	}
+
+	if (start < str.size()) 
+	{
+		AddToken(str.substr(start));
+	}
 }
 
 void LoadSettings() 
@@ -444,8 +717,10 @@ void LoadSettings()
 
 	if (g_backupProjects.empty())
 	{
-		g_backupProjects.push_back({L"Test", L"C:\\temp", L"c:\\backup", L"*.txt", L"", true});
-		g_backupProjects.push_back({L"Test2", L"C:\\temp1", L"c:\\backup", L"*.txt, *.jpg", L"temp*", true});
+		g_backupProjects.push_back({L"Test", L"C:\\temp", L"c:\\backup", {L"*.txt"}, {L""}});
+		g_backupProjects.back().UpdateRegex();
+		g_backupProjects.push_back({L"Test2", L"C:\\temp1", L"c:\\backup", {L"*.txt, *.jpg"}, {L"temp*"}});
+		g_backupProjects.back().UpdateRegex();
 		g_currentProject = &g_backupProjects[0];
 		ShowProjectDetails();
 	}
@@ -455,11 +730,9 @@ void LoadSettings()
     
 	g_backupProjects.clear();
 
-	BackupProject project;
-	std::wstring line;
-
 	// Window placement
 	{
+		std::wstring line;
 		std::getline(file, line);
 
 		std::wregex pattern(L"\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*(\\d+)\\s*,\\s*([-+]?\\d*\\.?\\d+)\\s*,\\s*([-+]?\\d*\\.?\\d+)\\s*");
@@ -480,22 +753,21 @@ void LoadSettings()
 		}
 	}
 
-	while (std::getline(file, line)) 
+	// Load projects
 	{
-		if (line.empty())
-			continue;
-        
-		size_t pos1 = line.find('|');
-		size_t pos2 = line.rfind('|');
+		BackupProject project;
 
-		if (pos1 == std::wstring::npos || pos2 == pos1) 
-			continue;
+		std::wstring line;
+		while (std::getline(file, line)) 
+		{
+			if (line.empty())
+				continue;
         
-		project.title				= line.substr(0, pos1);
-		project.rootPath			= line.substr(pos1 + 1, pos2 - pos1 - 1);
-		project.recurseSubfolders	= (line.substr(pos2 + 1) == L"1");
-        
-		g_backupProjects.push_back(project);
+			if (LoadBackupProject(line, project))
+			{
+				g_backupProjects.push_back(project);
+			}
+		}
 	}
 
 	file.close();
@@ -521,8 +793,46 @@ void SaveSettings()
 
 	for (const BackupProject& project : g_backupProjects) 
 	{
-		file << project.title << L"|" << project.rootPath << L"|" << (project.recurseSubfolders ? L"1" : L"0") << "\n";
+		file << SaveBackupProject(project) << "\n";
 	}
 
 	file.close();
+}
+
+std::wstring SaveBackupProject(const BackupProject& project)
+{
+	std::wostringstream os;
+
+	os	<< project.title << L"|" 
+		<< project.rootPath << L"|"
+		<< project.backupPath << L"|"
+		<< JoinPaths(project.includePaths) << L"|"
+		<< JoinPaths(project.excludePaths) << L"|";
+
+	return os.str();
+}
+
+bool LoadBackupProject(const std::wstring& line, BackupProject& project) 
+{
+	std::wstringstream ss(line);
+	std::wstring token;
+	std::vector<std::wstring> tokens;
+
+	// Split the line by '|'
+	while (std::getline(ss, token, L'|'))
+	{
+		tokens.push_back(token);
+	}
+
+	if (tokens.size() < 5) return false; // Ensure all fields exist
+
+	project.title = tokens[0];
+	project.rootPath = tokens[1];
+	project.backupPath = tokens[2];
+	project.SetIncludeFilter(tokens[3]);
+	project.SetExcludeFilter(tokens[4]);
+
+	project.UpdateRegex();
+
+	return true;
 }
