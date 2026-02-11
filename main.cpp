@@ -25,6 +25,7 @@ struct FolderWatcher
 
 static std::mutex													g_operationsMutex;
 static std::vector<BackupOperation>									g_operations;
+static const uint32_t												kOperationHistoryMaxCount = 1024;
 
 static std::shared_mutex											g_indexMutex;
 static std::unordered_map<std::wstring, std::vector<std::wstring>>	g_backupIndex;
@@ -60,9 +61,9 @@ static void PushOperation(const BackupOperation& backupOperation)
 
 	g_operations.push_back(backupOperation);
 
-	if (g_operations.size() > 100)
+	if (g_operations.size() > kOperationHistoryMaxCount)
 	{
-		g_operations.erase(g_operations.begin(), g_operations.begin() + (g_operations.size() - 100));
+		g_operations.erase(g_operations.begin(), g_operations.begin() + (g_operations.size() - kOperationHistoryMaxCount));
 	}
 }
 
@@ -444,7 +445,7 @@ static void ScanBackupFolder()
 	EnforceGlobalSizeLimit(std::fs::path(g_settings.backupRoot), g_settings.maxBackupSizeMB);
 }
 
-static bool ShouldDebounce(FolderWatcher& folderWatcher, const std::wstring& filePath, uint64_t nowTick)
+static bool SkipBackup(FolderWatcher& folderWatcher, const std::wstring& filePath, uint64_t nowTick)
 {
 	std::lock_guard<std::mutex> lock(folderWatcher.debounceMutex);
 
@@ -530,9 +531,9 @@ static void WatchThreadProc(FolderWatcher* watcher)
 
 			if (isInteresting)
 			{
-				if (!ShouldDebounce(*watcher, fullPath, nowTick))
+				if (PassesFilters(watchedFolder, fullPath))
 				{
-					if (PassesFilters(watchedFolder, fullPath))
+					if (!SkipBackup(*watcher, fullPath, nowTick))
 					{
 						CopyToBackupAndIndex(watchedFolder, fullPath);
 					}
@@ -587,10 +588,6 @@ static void StartWatchersFromSettings()
 		g_watchers.push_back(std::move(folderWatcher));
 	}
 }
-
-// ============================================================================
-// UI Tabs
-// ============================================================================
 
 static void UI_WatchedFolders()
 {
@@ -777,9 +774,9 @@ static void UI_BackedUpFiles()
 	}
 }
 
-static void UI_Operations()
+static void UI_History()
 {
-	ImGui::TextUnformatted("Last 100 operations");
+	ImGui::Text("Last %d operations", kOperationHistoryMaxCount);
 	ImGui::HelpTooltip("Shows copy successes/failures and reasons for skips.");
 	ImGui::Separator();
 
@@ -934,9 +931,9 @@ bool AppDraw()
 			UI_BackedUpFiles();
 			ImGui::EndTabItem();
 		}
-		if (ImGui::BeginTabItem("Operations"))
+		if (ImGui::BeginTabItem("Backup History"))
 		{
-			UI_Operations();
+			UI_History();
 			ImGui::EndTabItem();
 		}
 		if (ImGui::BeginTabItem("Settings"))
