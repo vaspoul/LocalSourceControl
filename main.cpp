@@ -95,7 +95,7 @@ static std::optional<uint64_t> TryGetFileWriteTimeU64(const std::wstring& path)
 
 static bool FilterMatchToken(const std::wstring& fileNameLower, const std::wstring& extWithDotLower, const std::wstring& tokenRaw)
 {
-	std::wstring token = ToLowerW(TrimW(tokenRaw));
+	std::wstring token = ToLower(Trim(tokenRaw));
 	if (token.empty())
 	{
 		return false;
@@ -130,11 +130,11 @@ static bool FilterMatchToken(const std::wstring& fileNameLower, const std::wstri
 
 static bool PassesFilters(const WatchedFolder& wf, const std::wstring& fullPath)
 {
-	std::wstring name = ToLowerW(fs::path(fullPath).filename().wstring());
-	std::wstring ext = ToLowerW(fs::path(fullPath).extension().wstring());
+	std::wstring name = ToLower(std::fs::path(fullPath).filename().wstring());
+	std::wstring ext = ToLower(std::fs::path(fullPath).extension().wstring());
 
-	std::vector<std::wstring> includes = SplitCSVW(wf.includeFiltersCSV);
-	std::vector<std::wstring> excludes = SplitCSVW(wf.excludeFiltersCSV);
+	std::vector<std::wstring> includes = SplitCSV(wf.includeFiltersCSV);
+	std::vector<std::wstring> excludes = SplitCSV(wf.excludeFiltersCSV);
 
 	for (const auto& t : excludes)
 	{
@@ -160,24 +160,24 @@ static bool PassesFilters(const WatchedFolder& wf, const std::wstring& fullPath)
 	return false;
 }
 
-static void EnsureDirExists(const fs::path& p)
+static void EnsureDirExists(const std::fs::path& p)
 {
 	std::error_code ec;
-	fs::create_directories(p, ec);
+	std::fs::create_directories(p, ec);
 }
 
-static uint64_t ComputeFolderSizeBytes(const fs::path& root)
+static uint64_t ComputeFolderSizeBytes(const std::fs::path& root)
 {
 	uint64_t total = 0;
 	std::error_code ec;
 
-	if (!fs::exists(root, ec))
+	if (!std::fs::exists(root, ec))
 	{
 		return 0;
 	}
 
-	for (auto it = fs::recursive_directory_iterator(root, fs::directory_options::skip_permission_denied, ec);
-		it != fs::recursive_directory_iterator();
+	for (auto it = std::fs::recursive_directory_iterator(root, std::fs::directory_options::skip_permission_denied, ec);
+		it != std::fs::recursive_directory_iterator();
 		++it)
 	{
 		if (ec)
@@ -202,11 +202,11 @@ static void EnforcePerFileLimit_Locked(BackupIndexItem& item, uint32_t maxBackup
 		item.backups.erase(item.backups.begin());
 
 		std::error_code ec;
-		fs::remove(fs::path(oldest.backupPath), ec);
+		std::fs::remove(std::fs::path(oldest.backupPath), ec);
 	}
 }
 
-static void EnforceGlobalSizeLimit(const fs::path& backupRoot, uint32_t maxSizeMB)
+static void EnforceGlobalSizeLimit(const std::fs::path& backupRoot, uint32_t maxSizeMB)
 {
 	if (backupRoot.empty())
 	{
@@ -250,12 +250,12 @@ static void EnforceGlobalSizeLimit(const fs::path& backupRoot, uint32_t maxSizeM
 		std::error_code ec;
 		uint64_t sz = 0;
 
-		if (fs::exists(all[i].backupPath, ec))
+		if (std::fs::exists(all[i].backupPath, ec))
 		{
-			sz = (uint64_t)fs::file_size(all[i].backupPath, ec);
+			sz = (uint64_t)std::fs::file_size(all[i].backupPath, ec);
 		}
 
-		fs::remove(all[i].backupPath, ec);
+		std::fs::remove(all[i].backupPath, ec);
 
 		{
 			std::unique_lock<std::shared_mutex> lock(g_indexMutex);
@@ -281,15 +281,15 @@ static void EnforceGlobalSizeLimit(const fs::path& backupRoot, uint32_t maxSizeM
 
 static std::wstring MakeBackupPath(const std::wstring& backupRoot, const std::wstring& originalFullPath)
 {
-	fs::path orig = fs::path(originalFullPath);
-	fs::path origDir = orig.parent_path();
-	fs::path stem = orig.stem();
-	fs::path ext = orig.extension();
+	std::fs::path orig = std::fs::path(originalFullPath);
+	std::fs::path origDir = orig.parent_path();
+	std::fs::path stem = orig.stem();
+	std::fs::path ext = orig.extension();
 
 	std::wstring sanitizedDir = SanitizePathForBackup(origDir.wstring());
-	fs::path dstDir = fs::path(backupRoot) / fs::path(sanitizedDir);
+	std::fs::path dstDir = std::fs::path(backupRoot) / std::fs::path(sanitizedDir);
 
-	std::wstring stamp = NowStamp();
+	std::wstring stamp = MakeTimestampStr();
 	std::wstring dstFile = stem.wstring() + L"_backup_" + stamp + ext.wstring();
 
 	return (dstDir / dstFile).wstring();
@@ -302,7 +302,7 @@ static bool CopyToBackupAndIndex(const WatchedFolder& wf, const std::wstring& fi
 	if (g_settings.backupRoot.empty())
 	{
 		BackupOperation op = {};
-		op.timeStamp = NowStamp();
+		op.timeStamp = MakeTimestampStr();
 		op.originalPath = filePath;
 		op.result = L"Skipped (backup folder not set)";
 		PushOperation(op);
@@ -310,20 +310,20 @@ static bool CopyToBackupAndIndex(const WatchedFolder& wf, const std::wstring& fi
 	}
 
 	std::error_code ec;
-	if (!fs::exists(filePath, ec) || !fs::is_regular_file(filePath, ec))
+	if (!std::fs::exists(filePath, ec) || !std::fs::is_regular_file(filePath, ec))
 	{
 		return false;
 	}
 
 	std::wstring dst = MakeBackupPath(g_settings.backupRoot, filePath);
-	EnsureDirExists(fs::path(dst).parent_path());
+	EnsureDirExists(std::fs::path(dst).parent_path());
 
 	BOOL ok = CopyFileW(filePath.c_str(), dst.c_str(), FALSE);
 	if (!ok)
 	{
 		DWORD err = GetLastError();
 		BackupOperation op = {};
-		op.timeStamp = NowStamp();
+		op.timeStamp = MakeTimestampStr();
 		op.originalPath = filePath;
 		op.backupPath = dst;
 		op.result = L"Copy failed (Win32 error " + std::to_wstring(err) + L")";
@@ -350,13 +350,13 @@ static bool CopyToBackupAndIndex(const WatchedFolder& wf, const std::wstring& fi
 	}
 
 	BackupOperation op = {};
-	op.timeStamp = NowStamp();
+	op.timeStamp = MakeTimestampStr();
 	op.originalPath = filePath;
 	op.backupPath = dst;
 	op.result = L"OK";
 	PushOperation(op);
 
-	EnforceGlobalSizeLimit(fs::path(g_settings.backupRoot), g_settings.maxBackupSizeMB);
+	EnforceGlobalSizeLimit(std::fs::path(g_settings.backupRoot), g_settings.maxBackupSizeMB);
 	return true;
 }
 
@@ -372,15 +372,15 @@ static void ScanBackupFolder()
 		return;
 	}
 
-	fs::path root = fs::path(g_settings.backupRoot);
+	std::fs::path root = std::fs::path(g_settings.backupRoot);
 	std::error_code ec;
-	if (!fs::exists(root, ec))
+	if (!std::fs::exists(root, ec))
 	{
 		return;
 	}
 
-	for (auto it = fs::recursive_directory_iterator(root, fs::directory_options::skip_permission_denied, ec);
-		it != fs::recursive_directory_iterator();
+	for (auto it = std::fs::recursive_directory_iterator(root, std::fs::directory_options::skip_permission_denied, ec);
+		it != std::fs::recursive_directory_iterator();
 		++it)
 	{
 		if (ec)
@@ -393,7 +393,7 @@ static void ScanBackupFolder()
 			continue;
 		}
 
-		fs::path p = it->path();
+		std::fs::path p = it->path();
 		std::wstring stem = p.stem().wstring();
 		size_t pos = stem.rfind(L"_backup_");
 		if (pos == std::wstring::npos)
@@ -404,7 +404,7 @@ static void ScanBackupFolder()
 		std::wstring originalStem = stem.substr(0, pos);
 		std::wstring ext = p.extension().wstring();
 
-		fs::path relDir = fs::relative(p.parent_path(), root, ec);
+		std::fs::path relDir = std::fs::relative(p.parent_path(), root, ec);
 		if (ec)
 		{
 			ec.clear();
@@ -412,7 +412,7 @@ static void ScanBackupFolder()
 		}
 
 		// Best-effort key for UI/search, derived from backup folder layout.
-		fs::path originalKey = relDir / fs::path(originalStem + ext);
+		std::fs::path originalKey = relDir / std::fs::path(originalStem + ext);
 
 		uint64_t ft = 0;
 		if (auto wt = TryGetFileWriteTimeU64(p.wstring()); wt.has_value())
@@ -439,7 +439,7 @@ static void ScanBackupFolder()
 		}
 	}
 
-	EnforceGlobalSizeLimit(fs::path(g_settings.backupRoot), g_settings.maxBackupSizeMB);
+	EnforceGlobalSizeLimit(std::fs::path(g_settings.backupRoot), g_settings.maxBackupSizeMB);
 }
 
 static bool ShouldDebounce(FolderWatcher& w, const std::wstring& path, uint64_t nowTick)
@@ -476,7 +476,7 @@ static void WatchThreadProc(FolderWatcher* watcher)
 	if (hDir == INVALID_HANDLE_VALUE)
 	{
 		BackupOperation op = {};
-		op.timeStamp = NowStamp();
+		op.timeStamp = MakeTimestampStr();
 		op.originalPath = cfg.path;
 		op.result = L"Watcher failed to open folder";
 		PushOperation(op);
@@ -504,7 +504,7 @@ static void WatchThreadProc(FolderWatcher* watcher)
 		{
 			DWORD err = GetLastError();
 			BackupOperation op = {};
-			op.timeStamp = NowStamp();
+			op.timeStamp = MakeTimestampStr();
 			op.originalPath = cfg.path;
 			op.result = L"ReadDirectoryChangesW failed (Win32 error " + std::to_wstring(err) + L")";
 			PushOperation(op);
@@ -517,7 +517,7 @@ static void WatchThreadProc(FolderWatcher* watcher)
 		while (true)
 		{
 			std::wstring rel(p->FileName, p->FileNameLength / sizeof(wchar_t));
-			std::wstring full = (fs::path(cfg.path) / fs::path(rel)).wstring();
+			std::wstring full = (std::fs::path(cfg.path) / std::fs::path(rel)).wstring();
 
 			bool interesting =
 				p->Action == FILE_ACTION_ADDED ||
@@ -588,7 +588,7 @@ static void StartWatchersFromSettings()
 static void UI_WatchedFolders()
 {
 	ImGui::TextUnformatted("Watched folders");
-	HelpTooltip(
+	ImGui::HelpTooltip(
 		"Tokens are comma-separated.\n"
 		"Supported token types:\n"
 		"  - Extension: .png or png\n"
@@ -643,9 +643,9 @@ static void UI_WatchedFolders()
 				inc.reserve(512);
 			}
 			ImGui::TextUnformatted("Include filters (CSV)");
-			HelpTooltip("Examples:\n  .png, .jpg\n  png, jpg\n  *.tmp\n  foo*, *bar*\n  report\nIf empty: include everything (unless excluded).");
+			ImGui::HelpTooltip("Examples:\n  .png, .jpg\n  png, jpg\n  *.tmp\n  foo*, *bar*\n  report\nIf empty: include everything (unless excluded).");
 			ImGui::SetNextItemWidth(-1.0f);
-			if (InputTextStdString("##include", inc))
+			if (ImGui::InputTextStdString("##include", inc))
 			{
 				wf.includeFiltersCSV = UTF8ToW(inc);
 				MarkSettingsDirty();
@@ -657,9 +657,9 @@ static void UI_WatchedFolders()
 				exc.reserve(512);
 			}
 			ImGui::TextUnformatted("Exclude filters (CSV)");
-			HelpTooltip("Examples:\n  .tmp, .bak\n  *autosave*\nExclude is checked first and always wins.");
+			ImGui::HelpTooltip("Examples:\n  .tmp, .bak\n  *autosave*\nExclude is checked first and always wins.");
 			ImGui::SetNextItemWidth(-1.0f);
-			if (InputTextStdString("##exclude", exc))
+			if (ImGui::InputTextStdString("##exclude", exc))
 			{
 				wf.excludeFiltersCSV = UTF8ToW(exc);
 				MarkSettingsDirty();
@@ -699,9 +699,9 @@ static void UI_BackedUpFiles()
 	static std::string search;
 
 	ImGui::TextUnformatted("Search");
-	HelpTooltip("Search is split into whitespace keywords.\nAll keywords must appear as substrings.\nExample: \"foo bar\" matches \"foontarbartastic\".");
+	ImGui::HelpTooltip("Search is split into whitespace keywords.\nAll keywords must appear as substrings.\nExample: \"foo bar\" matches \"foontarbartastic\".");
 	ImGui::SetNextItemWidth(-1.0f);
-	InputTextStdString("##search", search);
+	ImGui::InputTextStdString("##search", search);
 
 	ImGui::Separator();
 
@@ -718,7 +718,7 @@ static void UI_BackedUpFiles()
 		{
 			const auto& item = kv.second;
 			std::string pathUtf8 = WToUTF8(item.originalPath);
-			std::string pathLower = ToLowerA(pathUtf8);
+			std::string pathLower = ToLower(pathUtf8);
 
 			if (!search.empty())
 			{
@@ -740,7 +740,7 @@ static void UI_BackedUpFiles()
 			if (!item.backups.empty())
 			{
 				const auto& last = item.backups.back();
-				std::wstring bn = fs::path(last.backupPath).filename().wstring();
+				std::wstring bn = std::fs::path(last.backupPath).filename().wstring();
 				size_t p = bn.rfind(L"_backup_");
 				if (p != std::wstring::npos)
 				{
@@ -765,7 +765,7 @@ static void UI_BackedUpFiles()
 static void UI_Operations()
 {
 	ImGui::TextUnformatted("Last 100 operations");
-	HelpTooltip("Shows copy successes/failures and reasons for skips.");
+	ImGui::HelpTooltip("Shows copy successes/failures and reasons for skips.");
 	ImGui::Separator();
 
 	if (ImGui::BeginTable("ops", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY))
@@ -828,10 +828,10 @@ static void UI_Settings()
 			ScanBackupFolder();
 		}
 	}
-	HelpTooltip("Backups are nested by original path under this root.");
+	ImGui::HelpTooltip("Backups are nested by original path under this root.");
 
 	ImGui::SetNextItemWidth(-1.0f);
-	if (InputTextStdString("##backupRoot", backupRootUtf8))
+	if (ImGui::InputTextStdString("##backupRoot", backupRootUtf8))
 	{
 		g_settings.backupRoot = UTF8ToW(backupRootUtf8);
 		MarkSettingsDirty();
@@ -841,7 +841,7 @@ static void UI_Settings()
 
 	int maxSize = (int)g_settings.maxBackupSizeMB;
 	ImGui::TextUnformatted("Max backup folder size (MB)");
-	HelpTooltip("When exceeded, oldest backups across all files are deleted until within the limit.");
+	ImGui::HelpTooltip("When exceeded, oldest backups across all files are deleted until within the limit.");
 	ImGui::SetNextItemWidth(240.0f);
 	if (ImGui::InputInt("##maxsize", &maxSize))
 	{
@@ -855,7 +855,7 @@ static void UI_Settings()
 
 	int maxPerFile = (int)g_settings.maxBackupsPerFile;
 	ImGui::TextUnformatted("Max backups per file");
-	HelpTooltip("Per original file, keep at most this many backups. Oldest backups are deleted first.");
+	ImGui::HelpTooltip("Per original file, keep at most this many backups. Oldest backups are deleted first.");
 	ImGui::SetNextItemWidth(240.0f);
 	if (ImGui::InputInt("##maxperfile", &maxPerFile))
 	{
@@ -874,7 +874,7 @@ static void UI_Settings()
 		MarkSettingsDirty();
 		SaveSettings();
 		ScanBackupFolder();
-		EnforceGlobalSizeLimit(fs::path(g_settings.backupRoot), g_settings.maxBackupSizeMB);
+		EnforceGlobalSizeLimit(std::fs::path(g_settings.backupRoot), g_settings.maxBackupSizeMB);
 	}
 
 	ImGui::SameLine();

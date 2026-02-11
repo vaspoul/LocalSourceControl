@@ -22,11 +22,20 @@
 #include <string>
 #include <thread>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include <algorithm>
 
-namespace fs = std::filesystem;
+namespace std
+{
+	namespace fs = filesystem;
 
+	template<class Key, class Value>
+	using umap = unordered_map<Key, Value>;
+
+	template<class Value>
+	using uset = unordered_set<Value>;
+}
 
 struct WatchedFolder
 {

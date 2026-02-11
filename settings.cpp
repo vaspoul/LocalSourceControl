@@ -6,11 +6,6 @@ Settings				g_settings;
 std::atomic<uint64_t>	g_lastSettingsSaveTick = 0;
 std::atomic<uint64_t>	g_lastSettingsChangeTick = 0;
 
-void MarkSettingsDirty()
-{
-	g_lastSettingsChangeTick.store(GetTickCount64(), std::memory_order_relaxed);
-}
-
 std::wstring INIPath()
 {
 	wchar_t appDataPath[MAX_PATH] = {};
@@ -19,10 +14,10 @@ std::wstring INIPath()
 		return L"settings.ini";
 	}
 
-	fs::path dir = fs::path(appDataPath) / L"LocalSourceControl";
+	std::fs::path dir = std::fs::path(appDataPath) / L"LocalSourceControl";
 
 	std::error_code ec;
-	fs::create_directories(dir, ec);
+	std::fs::create_directories(dir, ec);
 
 	return (dir / L"settings.ini").wstring();
 }
@@ -64,33 +59,6 @@ void SaveSettings()
 		W("Include=" + WToUTF8(wf.includeFiltersCSV) + "\n");
 		W("Exclude=" + WToUTF8(wf.excludeFiltersCSV) + "\n\n");
 	}
-}
-
-void MaybeSaveSettingsThrottled()
-{
-	uint64_t now = GetTickCount64();
-	uint64_t lastChange = g_lastSettingsChangeTick.load(std::memory_order_relaxed);
-	uint64_t lastSave = g_lastSettingsSaveTick.load(std::memory_order_relaxed);
-
-	if (lastChange == 0)
-	{
-		return;
-	}
-
-	// Wait for brief "settling" time after changes
-	if (now < lastChange + 250)
-	{
-		return;
-	}
-
-	// Avoid excessive writes
-	if (now < lastSave + 500)
-	{
-		return;
-	}
-
-	SaveSettings();
-	g_lastSettingsSaveTick.store(now, std::memory_order_relaxed);
 }
 
 std::string GetINIValue(const std::unordered_map<std::string, std::unordered_map<std::string, std::string>>& ini, const std::string& section, const std::string& key, const std::string& def)
@@ -204,4 +172,37 @@ void LoadSettings()
 	}
 
 	g_settings = s;
+}
+
+void MarkSettingsDirty()
+{
+	g_lastSettingsChangeTick = GetTickCount64();
+}
+
+void MaybeSaveSettingsThrottled()
+{
+	uint64_t now = GetTickCount64();
+	uint64_t lastChange = g_lastSettingsChangeTick;
+	uint64_t lastSave = g_lastSettingsSaveTick;
+
+	if (lastChange == 0 || lastChange <= lastSave)
+	{
+		return;
+	}
+
+	// Wait for brief "settling" time after changes
+	if (now < lastChange + 250)
+	{
+		return;
+	}
+
+	// Avoid excessive writes
+	if (now < lastSave + 500)
+	{
+		return;
+	}
+
+	SaveSettings();
+
+	g_lastSettingsSaveTick = now;
 }

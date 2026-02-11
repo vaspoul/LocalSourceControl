@@ -27,7 +27,7 @@ std::string WToUTF8(const std::wstring& s)
 	return out;
 }
 
-std::wstring TrimW(const std::wstring& s)
+std::wstring Trim(const std::wstring& s)
 {
 	size_t a = 0;
 	while (a < s.size() && iswspace(s[a]))
@@ -42,7 +42,7 @@ std::wstring TrimW(const std::wstring& s)
 	return s.substr(a, b - a);
 }
 
-std::wstring ToLowerW(const std::wstring& s)
+std::wstring ToLower(const std::wstring& s)
 {
 	std::wstring out = s;
 	std::transform(out.begin(), out.end(), out.begin(), [](wchar_t c)
@@ -52,7 +52,7 @@ std::wstring ToLowerW(const std::wstring& s)
 	return out;
 }
 
-std::string ToLowerA(const std::string& s)
+std::string ToLower(const std::string& s)
 {
 	std::string out = s;
 	std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c)
@@ -62,16 +62,16 @@ std::string ToLowerA(const std::string& s)
 	return out;
 }
 
-std::vector<std::wstring> SplitCSVW(const std::wstring& csv)
+std::vector<std::wstring> SplitCSV(const std::wstring& csv)
 {
 	std::vector<std::wstring> out;
 	std::wstring cur;
 
 	for (wchar_t c : csv)
 	{
-		if (c == L',')
+		if (c == L',' || c == L';' || iswspace(c))
 		{
-			std::wstring t = TrimW(cur);
+			std::wstring t = Trim(cur);
 			if (!t.empty())
 			{
 				out.push_back(t);
@@ -84,7 +84,7 @@ std::vector<std::wstring> SplitCSVW(const std::wstring& csv)
 		}
 	}
 
-	std::wstring t = TrimW(cur);
+	std::wstring t = Trim(cur);
 	if (!t.empty())
 	{
 		out.push_back(t);
@@ -93,47 +93,46 @@ std::vector<std::wstring> SplitCSVW(const std::wstring& csv)
 	return out;
 }
 
-// Partial keyword match:
-// - split query by whitespace
-// - each token must be substring of haystackLower
-bool ContainsAllKeywords(const std::string& haystackLower, const std::string& query)
+bool ContainsAllKeywords(const std::string& phrase, const std::string& keywords)
 {
-	std::string q = ToLowerA(query);
-	size_t i = 0;
-
-	while (i < q.size())
+	if (keywords.empty())
 	{
-		while (i < q.size() && isspace((unsigned char)q[i]))
+		return true;
+	}
+
+	// Lowercase phrase internally
+	std::string phraseLower = ToLower(phrase);
+
+	// Convert keywords to wide and split using same token logic
+	std::wstring keywordsW = UTF8ToW(keywords);
+	std::vector<std::wstring> tokensW = SplitCSV(keywordsW);
+
+	if (tokensW.empty())
+	{
+		return true;
+	}
+
+	for (const std::wstring& tokenW : tokensW)
+	{
+		std::string token = ToLower(WToUTF8(tokenW));
+
+		if (token.empty())
 		{
-			++i;
-		}
-		if (i >= q.size())
-		{
-			break;
+			continue;
 		}
 
-		size_t j = i;
-		while (j < q.size() && !isspace((unsigned char)q[j]))
+		if (phraseLower.find(token) == std::string::npos)
 		{
-			++j;
+			return false;
 		}
-
-		std::string token = q.substr(i, j - i);
-		if (!token.empty())
-		{
-			if (haystackLower.find(token) == std::string::npos)
-			{
-				return false;
-			}
-		}
-
-		i = j;
 	}
 
 	return true;
 }
 
-std::wstring NowStamp()
+
+
+std::wstring MakeTimestampStr()
 {
 	using namespace std::chrono;
 	auto now = system_clock::now();
@@ -149,7 +148,8 @@ std::wstring NowStamp()
 	return buf;
 }
 
-
+namespace ImGui
+{
 bool InputTextStdString(const char* label, std::string& s, ImGuiInputTextFlags flags)
 {
 	if (s.capacity() < 256)
@@ -180,3 +180,5 @@ void HelpTooltip(const char* text)
 		ImGui::SetTooltip("%s", text);
 	}
 }
+
+} // namespace ImGui
