@@ -5,18 +5,6 @@
 #include "util.h"
 #include "settings.h"
 
-struct BackupEntry
-{
-	std::wstring	backupPath;
-	uint64_t		fileTime = 0;
-};
-
-struct BackupIndexItem
-{
-	std::wstring					originalPath;
-	std::vector<BackupEntry>		backups;
-};
-
 struct BackupOperation
 {
 	std::wstring	timeStamp;
@@ -35,14 +23,14 @@ struct FolderWatcher
 	std::unordered_map<std::wstring, uint64_t>	lastEventTickByPath;
 };
 
-static std::mutex												g_operationsMutex;
-static std::vector<BackupOperation>								g_operations;
+static std::mutex													g_operationsMutex;
+static std::vector<BackupOperation>									g_operations;
 
-static std::shared_mutex										g_indexMutex;
-static std::unordered_map<std::wstring, BackupIndexItem>		g_backupIndex;
+static std::shared_mutex											g_indexMutex;
+static std::unordered_map<std::wstring, std::vector<std::wstring>>	g_backupIndex;
 
-static std::mutex												g_watchersMutex;
-static std::vector<std::unique_ptr<FolderWatcher>>				g_watchers;
+static std::mutex													g_watchersMutex;
+static std::vector<std::unique_ptr<FolderWatcher>>					g_watchers;
 
 // Sanitize "C:\foo\bar" -> "C\foo\bar" so it can be nested under backup root
 static std::wstring SanitizePathForBackup(const std::wstring& absolutePath)
@@ -199,15 +187,15 @@ static uint64_t ComputeFolderSizeBytes(const std::fs::path& rootPath)
 	return totalBytes;
 }
 
-static void EnforcePerFileLimit_Locked(BackupIndexItem& indexItem, uint32_t maxBackupsPerFile)
+static void EnforcePerFileLimit_Locked(std::vector<std::wstring>& backupPaths, uint32_t maxBackupsPerFile)
 {
-	while (indexItem.backups.size() > maxBackupsPerFile)
+	while (backupPaths.size() > maxBackupsPerFile)
 	{
-		BackupEntry oldestBackup = indexItem.backups.front();
-		indexItem.backups.erase(indexItem.backups.begin());
+		std::wstring oldestBackupPath = backupPaths.front();
+		backupPaths.erase(backupPaths.begin());
 
-		std::error_code errorCode;
-		std::fs::remove(std::fs::path(oldestBackup.backupPath), errorCode);
+		std::error_code removeError;
+		std::fs::remove(std::fs::path(oldestBackupPath), removeError);
 	}
 }
 
@@ -228,9 +216,8 @@ static void EnforceGlobalSizeLimit(const std::fs::path& backupRootPath, uint32_t
 
 	struct GlobalBackupItem
 	{
-		std::wstring originalKey;
+		std::wstring originalPath;
 		std::wstring backupPath;
-		uint64_t	fileTime;
 	};
 
 	std::vector<GlobalBackupItem> allBackups;
@@ -240,20 +227,21 @@ static void EnforceGlobalSizeLimit(const std::fs::path& backupRootPath, uint32_t
 
 		for (const auto& kv : g_backupIndex)
 		{
-			const std::wstring& originalKey = kv.first;
-			const BackupIndexItem& indexItem = kv.second;
+			const std::wstring& originalPath = kv.first;
+			const std::vector<std::wstring>& backupPaths = kv.second;
 
-			for (const auto& backupEntry : indexItem.backups)
+			for (const std::wstring& backupPath : backupPaths)
 			{
-				allBackups.push_back(GlobalBackupItem{ originalKey, backupEntry.backupPath, backupEntry.fileTime });
+				allBackups.push_back(GlobalBackupItem{ originalPath, backupPath });
 			}
 		}
 	}
 
 	std::sort(allBackups.begin(), allBackups.end(), [](const GlobalBackupItem& left, const GlobalBackupItem& right)
 	{
-		return left.fileTime < right.fileTime;
+		return left.backupPath < right.backupPath;
 	});
+
 
 	size_t globalIndex = 0;
 
@@ -272,14 +260,12 @@ static void EnforceGlobalSizeLimit(const std::fs::path& backupRootPath, uint32_t
 		{
 			std::unique_lock<std::shared_mutex> lock(g_indexMutex);
 
-			auto foundItem = g_backupIndex.find(allBackups[globalIndex].originalKey);
+			auto foundItem = g_backupIndex.find(allBackups[globalIndex].originalPath);
 			if (foundItem != g_backupIndex.end())
 			{
-				auto& backups = foundItem->second.backups;
-				backups.erase(std::remove_if(backups.begin(), backups.end(), [&](const BackupEntry& entry)
-				{
-					return entry.backupPath == allBackups[globalIndex].backupPath;
-				}), backups.end());
+				auto& backupPaths = foundItem->second;
+
+				backupPaths.erase( std::remove( backupPaths.begin(), backupPaths.end(), allBackups[globalIndex].backupPath), backupPaths.end() );
 			}
 		}
 
@@ -354,16 +340,15 @@ static bool CopyToBackupAndIndex(const WatchedFolder& watchedFolder, const std::
 	{
 		std::unique_lock<std::shared_mutex> lock(g_indexMutex);
 
-		auto& indexItem = g_backupIndex[filePath];
-		indexItem.originalPath = filePath;
-		indexItem.backups.push_back(BackupEntry{ destinationPath, destinationWriteTime });
+		std::vector<std::wstring>& backupPaths = g_backupIndex[filePath];
+		backupPaths.push_back(destinationPath);
 
-		std::sort(indexItem.backups.begin(), indexItem.backups.end(), [](const BackupEntry& left, const BackupEntry& right)
+		std::sort(backupPaths.begin(), backupPaths.end(), [](const std::wstring& leftPath, const std::wstring& rightPath)
 		{
-			return left.fileTime < right.fileTime;
+			return leftPath < rightPath;
 		});
 
-		EnforcePerFileLimit_Locked(indexItem, g_settings.maxBackupsPerFile);
+		EnforcePerFileLimit_Locked(backupPaths, g_settings.maxBackupsPerFile);
 	}
 
 	{
@@ -399,9 +384,7 @@ static void ScanBackupFolder()
 		return;
 	}
 
-	for (auto iterator = std::fs::recursive_directory_iterator(backupRootPath, std::fs::directory_options::skip_permission_denied, errorCode);
-		iterator != std::fs::recursive_directory_iterator();
-		++iterator)
+	for (auto iterator = std::fs::recursive_directory_iterator(backupRootPath, std::fs::directory_options::skip_permission_denied, errorCode); iterator != std::fs::recursive_directory_iterator(); ++iterator)
 	{
 		if (errorCode)
 		{
@@ -426,27 +409,20 @@ static void ScanBackupFolder()
 		std::wstring originalStem = backupStem.substr(0, backupMarkerPos);
 		std::wstring originalExt = backupFilePath.extension().wstring();
 
-		std::fs::path relativeDir = std::fs::relative(backupFilePath.parent_path(), backupRootPath, errorCode);
+		std::fs::path relativeDir = std::fs::relative( backupFilePath.parent_path(), backupRootPath, errorCode);
+
 		if (errorCode)
 		{
 			errorCode.clear();
 			continue;
 		}
 
-		// Best-effort key for UI/search, derived from backup folder layout.
-		std::fs::path originalKeyPath = relativeDir / std::fs::path(originalStem + originalExt);
+		std::fs::path originalPath = relativeDir / std::fs::path(originalStem + originalExt);
 
-		uint64_t backupWriteTime = 0;
-		if (auto backupWriteTimeOpt = TryGetFileWriteTimeU64(backupFilePath.wstring()); backupWriteTimeOpt.has_value())
 		{
-			backupWriteTime = backupWriteTimeOpt.value();
+			std::unique_lock<std::shared_mutex> lock(g_indexMutex);
+			g_backupIndex[originalPath.wstring()].push_back(backupFilePath.wstring());
 		}
-
-		std::unique_lock<std::shared_mutex> lock(g_indexMutex);
-
-		auto& indexItem = g_backupIndex[originalKeyPath.wstring()];
-		indexItem.originalPath = originalKeyPath.wstring();
-		indexItem.backups.push_back(BackupEntry{ backupFilePath.wstring(), backupWriteTime });
 	}
 
 	{
@@ -454,12 +430,14 @@ static void ScanBackupFolder()
 
 		for (auto& kv : g_backupIndex)
 		{
-			auto& backups = kv.second.backups;
-			std::sort(backups.begin(), backups.end(), [](const BackupEntry& left, const BackupEntry& right)
+			std::vector<std::wstring>& backupPaths = kv.second;
+
+			std::sort(backupPaths.begin(), backupPaths.end(), [](const std::wstring& leftPath, const std::wstring& rightPath)
 			{
-				return left.fileTime < right.fileTime;
+				return leftPath < rightPath;
 			});
-			EnforcePerFileLimit_Locked(kv.second, g_settings.maxBackupsPerFile);
+
+			EnforcePerFileLimit_Locked(backupPaths, g_settings.maxBackupsPerFile);
 		}
 	}
 
@@ -750,9 +728,10 @@ static void UI_BackedUpFiles()
 
 		for (const auto& kv : g_backupIndex)
 		{
-			const auto& indexItem = kv.second;
+			const std::wstring& originalPath = kv.first;
+			const auto& backupPaths = kv.second;
 
-			std::string originalPathUtf8 = WToUTF8(indexItem.originalPath);
+			std::string originalPathUtf8 = WToUTF8(originalPath);
 
 			if (!searchText.empty())
 			{
@@ -769,13 +748,13 @@ static void UI_BackedUpFiles()
 			ImGui::TextUnformatted(originalPathUtf8.c_str());
 
 			ImGui::TableSetColumnIndex(1);
-			ImGui::Text("%d", (int)indexItem.backups.size());
+			ImGui::Text("%d", (int)backupPaths.size());
 
 			ImGui::TableSetColumnIndex(2);
-			if (!indexItem.backups.empty())
+			if (!backupPaths.empty())
 			{
-				const auto& lastBackup = indexItem.backups.back();
-				std::wstring backupFileName = std::fs::path(lastBackup.backupPath).filename().wstring();
+				const std::wstring& lastBackupPath = backupPaths.back();
+				std::wstring backupFileName = std::fs::path(lastBackupPath).filename().wstring();
 
 				size_t markerPos = backupFileName.rfind(L"_backup_");
 				if (markerPos != std::wstring::npos)
@@ -938,8 +917,7 @@ bool AppLoop()
 {
 	MaybeSaveSettingsThrottled();
 
-	// Returning true here typically means "keep running".
-	return true;
+	return false;
 }
 
 bool AppDraw()
@@ -969,8 +947,7 @@ bool AppDraw()
 		ImGui::EndTabBar();
 	}
 
-	// Returning true here typically means "draw succeeded / keep running".
-	return true;
+	return false;
 }
 
 void AppShutdown()

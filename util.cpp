@@ -141,7 +141,7 @@ std::wstring MakeTimestampStr()
 	localtime_s(&tmv, &tt);
 
 	wchar_t buf[64] = {};
-	swprintf_s(buf, L"%04d%02d%02d_%02d%02d%02d",
+	swprintf_s(buf, L"%04d_%02d_%02d__%02d_%02d_%02d",
 		tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
 		tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
 
