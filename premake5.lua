@@ -60,6 +60,8 @@ project("LocalSourceControl")
 	language("C++")
 	cppdialect("C++17")
 	characterset("Unicode")
+	pchheader "main.h"
+	pchsource "pch.cpp"
 
 	debugdir(".")
 
