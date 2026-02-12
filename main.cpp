@@ -17,6 +17,7 @@ struct FolderWatcher
 {
 	WatchedFolder								config;
 	std::thread									workerThread;
+	HANDLE										directoryHandle = INVALID_HANDLE_VALUE;
 	std::atomic<bool>							stopRequested = false;
 
 	std::mutex									debounceMutex;
@@ -467,7 +468,7 @@ static void WatchThreadProc(FolderWatcher* watcher)
 {
 	const WatchedFolder watchedFolder = watcher->config;
 
-	HANDLE directoryHandle = CreateFileW(
+	watcher->directoryHandle = CreateFileW(
 		watchedFolder.path.c_str(),
 		FILE_LIST_DIRECTORY,
 		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
@@ -476,7 +477,7 @@ static void WatchThreadProc(FolderWatcher* watcher)
 		FILE_FLAG_BACKUP_SEMANTICS,
 		nullptr);
 
-	if (directoryHandle == INVALID_HANDLE_VALUE)
+	if (watcher->directoryHandle == INVALID_HANDLE_VALUE)
 	{
 		BackupOperation backupOperation = {};
 		backupOperation.timeStamp = MakeTimestampStr();
@@ -495,7 +496,7 @@ static void WatchThreadProc(FolderWatcher* watcher)
 		DWORD bytesReturned = 0;
 
 		BOOL readSucceeded = ReadDirectoryChangesW(
-			directoryHandle,
+			watcher->directoryHandle,
 			notifyBuffer.data(),
 			(DWORD)notifyBuffer.size(),
 			watchedFolder.includeSubfolders ? TRUE : FALSE,
@@ -506,13 +507,17 @@ static void WatchThreadProc(FolderWatcher* watcher)
 
 		if (!readSucceeded)
 		{
-			DWORD win32Error = GetLastError();
+			if (!watcher->stopRequested.load())
+			{
+				DWORD win32Error = GetLastError();
 
-			BackupOperation backupOperation = {};
-			backupOperation.timeStamp = MakeTimestampStr();
-			backupOperation.originalPath = watchedFolder.path;
-			backupOperation.result = L"ReadDirectoryChangesW failed (Win32 error " + std::to_wstring(win32Error) + L")";
-			PushOperation(backupOperation);
+				BackupOperation backupOperation = {};
+				backupOperation.timeStamp = MakeTimestampStr();
+				backupOperation.originalPath = watchedFolder.path;
+				backupOperation.result = L"ReadDirectoryChangesW failed (Win32 error " + std::to_wstring(win32Error) + L")";
+				PushOperation(backupOperation);
+			}
+
 			break;
 		}
 
@@ -549,16 +554,17 @@ static void WatchThreadProc(FolderWatcher* watcher)
 		}
 	}
 
-	CloseHandle(directoryHandle);
+	CloseHandle(watcher->directoryHandle);
 }
 
 static void StopWatchers()
 {
 	std::lock_guard<std::mutex> lock(g_watchersMutex);
 
-	for (auto& watcher : g_watchers)
+	for (std::unique_ptr<FolderWatcher>& watcher : g_watchers)
 	{
 		watcher->stopRequested.store(true);
+		CancelIoEx(watcher->directoryHandle, nullptr);
 	}
 
 	for (auto& watcher : g_watchers)
