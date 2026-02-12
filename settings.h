@@ -11,6 +11,7 @@ struct Settings
 	std::wstring	backupRoot = L"";
 	uint32_t		maxBackupSizeMB = 10240;
 	uint32_t		maxBackupsPerFile = 50;
+	std::wstring	diffToolPath;
 
 	std::vector<WatchedFolder> watched;
 };

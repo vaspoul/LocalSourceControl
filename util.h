@@ -11,11 +11,13 @@ std::string					ToLower(const std::string& s);
 std::vector<std::wstring>	SplitCSV(const std::wstring& csv);
 bool						ContainsAllKeywords(const std::string& phrase, const std::string& keywords);
 std::wstring				MakeTimestampStr();
+bool						IsPathUnderRoot(const std::wstring& candidatePath, const std::wstring& rootPath);
 
 namespace ImGui
 {
 bool						InputTextStdString(const char* label, std::string& s, ImGuiInputTextFlags flags = 0);
 void						HelpTooltip(const char* text);
+bool						TextClickable(const char* fmt, ...);
 }
 
 #endif // UTIL_H

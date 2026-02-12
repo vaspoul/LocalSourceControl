@@ -10,6 +10,8 @@
 #include <ShlObj_core.h>	// BROWSEINFOW (requested)
 #include <shobjidl.h>		// IFileDialog (new-style folder picker)
 #include <shlwapi.h>
+#include <shellapi.h>
+#include <objbase.h>
 
 #include <atomic>
 #include <chrono>

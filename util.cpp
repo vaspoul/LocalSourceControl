@@ -1,5 +1,6 @@
 #include "main.h"
 #include "util.h"
+#include "imgui/imgui_internal.h"
 
 std::wstring UTF8ToW(const std::string& s)
 {
@@ -148,6 +149,41 @@ std::wstring MakeTimestampStr()
 	return buf;
 }
 
+bool IsPathUnderRoot(const std::wstring& candidatePath, const std::wstring& rootPath)
+{
+	if (rootPath.empty())
+	{
+		return false;
+	}
+
+	std::error_code errorCode;
+
+	std::fs::path candidateCanonical = std::fs::weakly_canonical(std::fs::path(candidatePath), errorCode);
+	if (errorCode)
+	{
+		errorCode.clear();
+		candidateCanonical = std::fs::path(candidatePath);
+	}
+
+	std::fs::path rootCanonical = std::fs::weakly_canonical(std::fs::path(rootPath), errorCode);
+	if (errorCode)
+	{
+		errorCode.clear();
+		rootCanonical = std::fs::path(rootPath);
+	}
+
+	std::wstring candidateLower = ToLower(candidateCanonical.wstring());
+	std::wstring rootLower = ToLower(rootCanonical.wstring());
+
+	// Ensure root ends with backslash for proper prefix match
+	if (!rootLower.empty() && rootLower.back() != L'\\')
+	{
+		rootLower.push_back(L'\\');
+	}
+
+	return candidateLower.rfind(rootLower, 0) == 0;
+}
+
 namespace ImGui
 {
 bool InputTextStdString(const char* label, std::string& s, ImGuiInputTextFlags flags)
@@ -179,6 +215,51 @@ void HelpTooltip(const char* text)
 	{
 		ImGui::SetTooltip("%s", text);
 	}
+}
+
+// See https://github.com/ocornut/imgui/issues/5280
+bool TextClickable(const char* fmt, ...)
+{
+	ImU32 hoverColor = ImGui::GetColorU32(ImGuiCol_ButtonHovered);
+
+	ImGuiContext& g = *GImGui;
+
+	ImGuiWindow* window = ImGui::GetCurrentWindow();
+	
+	if (window->SkipItems)
+		return false;
+
+	// Format text
+	char txtBuffer[1024*3+1];
+	va_list args;
+	va_start(args, fmt);
+	const char* text_begin = txtBuffer;
+	const char* text_end = txtBuffer + ImFormatStringV(txtBuffer, IM_ARRAYSIZE(txtBuffer), fmt, args);
+	va_end(args);
+
+	// Layout
+	const ImVec2 text_pos(window->DC.CursorPos.x, window->DC.CursorPos.y + window->DC.CurrLineTextBaseOffset);
+	const ImVec2 text_size = ImGui::CalcTextSize(text_begin, text_end);
+
+	ImRect bb(text_pos.x, text_pos.y, text_pos.x + text_size.x, text_pos.y + text_size.y);
+	
+	ImGui::ItemSize(text_size, 0.0f);
+	
+	if (!ImGui::ItemAdd(bb, 0))
+		return false;
+
+	// Render
+	bool hovered = ImGui::IsItemHovered();
+	
+	if (hovered)
+		ImGui::PushStyleColor(ImGuiCol_Text, hoverColor);
+
+	ImGui::RenderText(bb.Min, text_begin, text_end, false);
+	
+	if (hovered)
+		ImGui::PopStyleColor();
+
+	return ImGui::IsItemClicked();
 }
 
 } // namespace ImGui

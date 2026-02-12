@@ -14,195 +14,214 @@ std::wstring INIPath()
 		return L"settings.ini";
 	}
 
-	std::fs::path dir = std::fs::path(appDataPath) / L"LocalSourceControl";
+	std::fs::path settingsDir = std::fs::path(appDataPath) / L"LocalSourceControl";
 
-	std::error_code ec;
-	std::fs::create_directories(dir, ec);
+	std::error_code errorCode;
+	std::fs::create_directories(settingsDir, errorCode);
 
-	return (dir / L"settings.ini").wstring();
+	return (settingsDir / L"settings.ini").wstring();
 }
 
 void SaveSettings()
 {
-	std::wstring ini = INIPath();
-	std::ofstream f(ini, std::ios::binary);
-	if (!f)
+	std::wstring iniPath = INIPath();
+	std::ofstream fileStream(iniPath, std::ios::binary);
+	if (!fileStream)
 	{
 		return;
 	}
 
-	auto W = [&](const std::string& s)
+	auto WriteText = [&](const std::string& text)
 	{
-		f.write(s.data(), (std::streamsize)s.size());
+		fileStream.write(text.data(), (std::streamsize)text.size());
 	};
 
-	W("[Window]\n");
-	W("X=" + std::to_string(g_settings.winX) + "\n");
-	W("Y=" + std::to_string(g_settings.winY) + "\n");
-	W("W=" + std::to_string(g_settings.winW) + "\n");
-	W("H=" + std::to_string(g_settings.winH) + "\n\n");
+	WriteText("[Window]\n");
+	WriteText("X=" + std::to_string(g_settings.winX) + "\n");
+	WriteText("Y=" + std::to_string(g_settings.winY) + "\n");
+	WriteText("W=" + std::to_string(g_settings.winW) + "\n");
+	WriteText("H=" + std::to_string(g_settings.winH) + "\n\n");
 
-	W("[Backup]\n");
-	W("Root=" + WToUTF8(g_settings.backupRoot) + "\n");
-	W("MaxSizeMB=" + std::to_string(g_settings.maxBackupSizeMB) + "\n");
-	W("MaxBackupsPerFile=" + std::to_string(g_settings.maxBackupsPerFile) + "\n\n");
+	WriteText("[Backup]\n");
+	WriteText("Root=" + WToUTF8(g_settings.backupRoot) + "\n");
+	WriteText("MaxSizeMB=" + std::to_string(g_settings.maxBackupSizeMB) + "\n");
+	WriteText("MaxBackupsPerFile=" + std::to_string(g_settings.maxBackupsPerFile) + "\n\n");
 
-	W("[Watched]\n");
-	W("Count=" + std::to_string((int)g_settings.watched.size()) + "\n\n");
+	// Diff tool settings (used by Ctrl+D in history)
+	WriteText("[Tools]\n");
+	WriteText("DiffTool=" + WToUTF8(g_settings.diffToolPath) + "\n\n");
 
-	for (size_t i = 0; i < g_settings.watched.size(); ++i)
+	WriteText("[Watched]\n");
+	WriteText("Count=" + std::to_string((int)g_settings.watched.size()) + "\n\n");
+
+	for (size_t watchedIndex = 0; watchedIndex < g_settings.watched.size(); ++watchedIndex)
 	{
-		const auto& wf = g_settings.watched[i];
-		W("[Watched." + std::to_string((int)i) + "]\n");
-		W("Path=" + WToUTF8(wf.path) + "\n");
-		W("IncludeSub=" + std::to_string(wf.includeSubfolders ? 1 : 0) + "\n");
-		W("Include=" + WToUTF8(wf.includeFiltersCSV) + "\n");
-		W("Exclude=" + WToUTF8(wf.excludeFiltersCSV) + "\n\n");
+		const auto& watchedFolder = g_settings.watched[watchedIndex];
+
+		WriteText("[Watched." + std::to_string((int)watchedIndex) + "]\n");
+		WriteText("Path=" + WToUTF8(watchedFolder.path) + "\n");
+		WriteText("IncludeSub=" + std::to_string(watchedFolder.includeSubfolders ? 1 : 0) + "\n");
+		WriteText("Include=" + WToUTF8(watchedFolder.includeFiltersCSV) + "\n");
+		WriteText("Exclude=" + WToUTF8(watchedFolder.excludeFiltersCSV) + "\n\n");
 	}
 }
 
-std::string GetINIValue(const std::unordered_map<std::string, std::unordered_map<std::string, std::string>>& ini, const std::string& section, const std::string& key, const std::string& def)
+static std::string GetINIValue(
+	const std::unordered_map<std::string, std::unordered_map<std::string, std::string>>& parsedIni,
+	const std::string& sectionName,
+	const std::string& keyName,
+	const std::string& defaultValue)
 {
-	auto itS = ini.find(section);
-	if (itS == ini.end())
+	auto foundSection = parsedIni.find(sectionName);
+	if (foundSection == parsedIni.end())
 	{
-		return def;
+		return defaultValue;
 	}
-	auto itK = itS->second.find(key);
-	if (itK == itS->second.end())
+
+	auto foundKey = foundSection->second.find(keyName);
+	if (foundKey == foundSection->second.end())
 	{
-		return def;
+		return defaultValue;
 	}
-	return itK->second;
+
+	return foundKey->second;
 }
 
 void LoadSettings()
 {
-	Settings s = {};
+	Settings loadedSettings = {};
 
-	std::wstring ini = INIPath();
-	std::ifstream f(ini, std::ios::binary);
-	if (!f)
+	std::wstring iniPath = INIPath();
+	std::ifstream fileStream(iniPath, std::ios::binary);
+	if (!fileStream)
 	{
-		g_settings = s;
+		g_settings = loadedSettings;
 		return;
 	}
 
-	std::string text((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+	std::string fileText((std::istreambuf_iterator<char>(fileStream)), std::istreambuf_iterator<char>());
 
-	std::unordered_map<std::string, std::unordered_map<std::string, std::string>> parsed;
-	std::string curSection;
+	std::unordered_map<std::string, std::unordered_map<std::string, std::string>> parsedIni;
+	std::string currentSection;
 
-	auto trimA = [](const std::string& x)
+	auto TrimAscii = [](const std::string& input)
 	{
-		size_t a = 0;
-		while (a < x.size() && isspace((unsigned char)x[a]))
+		size_t beginIndex = 0;
+		while (beginIndex < input.size() && isspace((unsigned char)input[beginIndex]))
 		{
-			++a;
+			++beginIndex;
 		}
-		size_t b = x.size();
-		while (b > a && isspace((unsigned char)x[b - 1]))
+
+		size_t endIndex = input.size();
+		while (endIndex > beginIndex && isspace((unsigned char)input[endIndex - 1]))
 		{
-			--b;
+			--endIndex;
 		}
-		return x.substr(a, b - a);
+
+		return input.substr(beginIndex, endIndex - beginIndex);
 	};
 
-	size_t i = 0;
-	while (i < text.size())
+	size_t textIndex = 0;
+	while (textIndex < fileText.size())
 	{
-		size_t j = text.find('\n', i);
-		if (j == std::string::npos)
+		size_t lineEndIndex = fileText.find('\n', textIndex);
+		if (lineEndIndex == std::string::npos)
 		{
-			j = text.size();
-		}
-		std::string line = text.substr(i, j - i);
-		if (!line.empty() && line.back() == '\r')
-		{
-			line.pop_back();
-		}
-		i = j + 1;
-
-		line = trimA(line);
-		if (line.empty() || line[0] == ';' || line[0] == '#')
-		{
-			continue;
-		}
-		if (line.front() == '[' && line.back() == ']')
-		{
-			curSection = line.substr(1, line.size() - 2);
-			continue;
+			lineEndIndex = fileText.size();
 		}
 
-		size_t eq = line.find('=');
-		if (eq == std::string::npos)
+		std::string lineText = fileText.substr(textIndex, lineEndIndex - textIndex);
+		if (!lineText.empty() && lineText.back() == '\r')
+		{
+			lineText.pop_back();
+		}
+
+		textIndex = lineEndIndex + 1;
+
+		lineText = TrimAscii(lineText);
+		if (lineText.empty() || lineText[0] == ';' || lineText[0] == '#')
 		{
 			continue;
 		}
 
-		std::string k = trimA(line.substr(0, eq));
-		std::string v = trimA(line.substr(eq + 1));
-		parsed[curSection][k] = v;
+		if (lineText.front() == '[' && lineText.back() == ']')
+		{
+			currentSection = lineText.substr(1, lineText.size() - 2);
+			continue;
+		}
+
+		size_t equalsIndex = lineText.find('=');
+		if (equalsIndex == std::string::npos)
+		{
+			continue;
+		}
+
+		std::string keyText = TrimAscii(lineText.substr(0, equalsIndex));
+		std::string valueText = TrimAscii(lineText.substr(equalsIndex + 1));
+		parsedIni[currentSection][keyText] = valueText;
 	}
 
-	s.winX = std::stoi(GetINIValue(parsed, "Window", "X", std::to_string(s.winX)));
-	s.winY = std::stoi(GetINIValue(parsed, "Window", "Y", std::to_string(s.winY)));
-	s.winW = std::stoi(GetINIValue(parsed, "Window", "W", std::to_string(s.winW)));
-	s.winH = std::stoi(GetINIValue(parsed, "Window", "H", std::to_string(s.winH)));
+	loadedSettings.winX = std::stoi(GetINIValue(parsedIni, "Window", "X", std::to_string(loadedSettings.winX)));
+	loadedSettings.winY = std::stoi(GetINIValue(parsedIni, "Window", "Y", std::to_string(loadedSettings.winY)));
+	loadedSettings.winW = std::stoi(GetINIValue(parsedIni, "Window", "W", std::to_string(loadedSettings.winW)));
+	loadedSettings.winH = std::stoi(GetINIValue(parsedIni, "Window", "H", std::to_string(loadedSettings.winH)));
 
-	s.backupRoot = UTF8ToW(GetINIValue(parsed, "Backup", "Root", WToUTF8(s.backupRoot)));
-	s.maxBackupSizeMB = (uint32_t)std::stoul(GetINIValue(parsed, "Backup", "MaxSizeMB", std::to_string(s.maxBackupSizeMB)));
-	s.maxBackupsPerFile = (uint32_t)std::stoul(GetINIValue(parsed, "Backup", "MaxBackupsPerFile", std::to_string(s.maxBackupsPerFile)));
+	loadedSettings.backupRoot = UTF8ToW(GetINIValue(parsedIni, "Backup", "Root", WToUTF8(loadedSettings.backupRoot)));
+	loadedSettings.maxBackupSizeMB = (uint32_t)std::stoul(GetINIValue(parsedIni, "Backup", "MaxSizeMB", std::to_string(loadedSettings.maxBackupSizeMB)));
+	loadedSettings.maxBackupsPerFile = (uint32_t)std::stoul(GetINIValue(parsedIni, "Backup", "MaxBackupsPerFile", std::to_string(loadedSettings.maxBackupsPerFile)));
 
-	int count = std::stoi(GetINIValue(parsed, "Watched", "Count", "0"));
-	for (int idx = 0; idx < count; ++idx)
+	// Diff tool path
+	loadedSettings.diffToolPath = UTF8ToW(GetINIValue(parsedIni, "Tools", "DiffTool", WToUTF8(loadedSettings.diffToolPath)));
+
+	int watchedCount = std::stoi(GetINIValue(parsedIni, "Watched", "Count", "0"));
+	for (int watchedIndex = 0; watchedIndex < watchedCount; ++watchedIndex)
 	{
-		WatchedFolder wf = {};
-		std::string sec = "Watched." + std::to_string(idx);
+		WatchedFolder watchedFolder = {};
+		std::string watchedSection = "Watched." + std::to_string(watchedIndex);
 
-		wf.path = UTF8ToW(GetINIValue(parsed, sec, "Path", ""));
-		wf.includeSubfolders = GetINIValue(parsed, sec, "IncludeSub", "1") != "0";
-		wf.includeFiltersCSV = UTF8ToW(GetINIValue(parsed, sec, "Include", ""));
-		wf.excludeFiltersCSV = UTF8ToW(GetINIValue(parsed, sec, "Exclude", ""));
+		watchedFolder.path = UTF8ToW(GetINIValue(parsedIni, watchedSection, "Path", ""));
+		watchedFolder.includeSubfolders = GetINIValue(parsedIni, watchedSection, "IncludeSub", "1") != "0";
+		watchedFolder.includeFiltersCSV = UTF8ToW(GetINIValue(parsedIni, watchedSection, "Include", ""));
+		watchedFolder.excludeFiltersCSV = UTF8ToW(GetINIValue(parsedIni, watchedSection, "Exclude", ""));
 
-		if (!wf.path.empty())
+		if (!watchedFolder.path.empty())
 		{
-			s.watched.push_back(wf);
+			loadedSettings.watched.push_back(watchedFolder);
 		}
 	}
 
-	g_settings = s;
+	g_settings = loadedSettings;
 }
 
 void MarkSettingsDirty()
 {
-	g_lastSettingsChangeTick = GetTickCount64();
+	g_lastSettingsChangeTick.store(GetTickCount64(), std::memory_order_relaxed);
 }
 
 void MaybeSaveSettingsThrottled()
 {
-	uint64_t now = GetTickCount64();
-	uint64_t lastChange = g_lastSettingsChangeTick;
-	uint64_t lastSave = g_lastSettingsSaveTick;
+	uint64_t nowTick = GetTickCount64();
+	uint64_t lastChangeTick = g_lastSettingsChangeTick.load(std::memory_order_relaxed);
+	uint64_t lastSaveTick = g_lastSettingsSaveTick.load(std::memory_order_relaxed);
 
-	if (lastChange == 0 || lastChange <= lastSave)
+	if (lastChangeTick == 0 || lastChangeTick <= lastSaveTick)
 	{
 		return;
 	}
 
 	// Wait for brief "settling" time after changes
-	if (now < lastChange + 250)
+	if (nowTick < lastChangeTick + 250)
 	{
 		return;
 	}
 
 	// Avoid excessive writes
-	if (now < lastSave + 500)
+	if (nowTick < lastSaveTick + 500)
 	{
 		return;
 	}
 
 	SaveSettings();
 
-	g_lastSettingsSaveTick = now;
+	g_lastSettingsSaveTick.store(nowTick, std::memory_order_relaxed);
 }

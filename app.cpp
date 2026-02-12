@@ -351,3 +351,115 @@ std::wstring BrowseForFolder(const std::wstring& title)
 	CoTaskMemFree(pszPath);
 	return out;
 }
+
+std::wstring BrowseForExeFile()
+{
+	std::wstring selectedPath;
+
+	HRESULT initResult = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+	bool didInitCom = SUCCEEDED(initResult);
+
+	IFileOpenDialog* fileDialog = nullptr;
+	HRESULT createResult = CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&fileDialog));
+	if (FAILED(createResult) || !fileDialog)
+	{
+		if (didInitCom)
+		{
+			CoUninitialize();
+		}
+		return L"";
+	}
+
+	DWORD options = 0;
+	fileDialog->GetOptions(&options);
+	fileDialog->SetOptions(options | FOS_FILEMUSTEXIST | FOS_PATHMUSTEXIST);
+
+	COMDLG_FILTERSPEC filterSpecs[] =
+	{
+		{ L"Executables", L"*.exe" },
+		{ L"All Files", L"*.*" }
+	};
+
+	fileDialog->SetFileTypes((UINT)std::size(filterSpecs), filterSpecs);
+	fileDialog->SetTitle(L"Select diff tool executable");
+
+	// Default folder = %ProgramFiles%
+	{
+		wchar_t programFilesPath[MAX_PATH] = {};
+		size_t requiredSize = 0;
+
+		errno_t envResult = _wgetenv_s(
+			&requiredSize,
+			programFilesPath,
+			MAX_PATH,
+			L"ProgramFiles");
+
+		if (envResult == 0 && requiredSize > 0)
+		{
+			IShellItem* defaultFolderItem = nullptr;
+
+			HRESULT shellItemResult = SHCreateItemFromParsingName(
+				programFilesPath,
+				nullptr,
+				IID_PPV_ARGS(&defaultFolderItem));
+
+			if (SUCCEEDED(shellItemResult) && defaultFolderItem)
+			{
+				fileDialog->SetDefaultFolder(defaultFolderItem);
+				defaultFolderItem->Release();
+			}
+		}
+	}
+
+	HRESULT showResult = fileDialog->Show(nullptr);
+	if (SUCCEEDED(showResult))
+	{
+		IShellItem* resultItem = nullptr;
+		if (SUCCEEDED(fileDialog->GetResult(&resultItem)) && resultItem)
+		{
+			PWSTR filePath = nullptr;
+			if (SUCCEEDED(resultItem->GetDisplayName(SIGDN_FILESYSPATH, &filePath)) && filePath)
+			{
+				selectedPath = filePath;
+				CoTaskMemFree(filePath);
+			}
+			resultItem->Release();
+		}
+	}
+
+	fileDialog->Release();
+
+	if (didInitCom)
+	{
+		CoUninitialize();
+	}
+
+	return selectedPath;
+}
+
+void OpenFileWithShell(const std::wstring& filePath)
+{
+	if (filePath.empty())
+	{
+		return;
+	}
+
+	(void)ShellExecuteW(nullptr, L"open", filePath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
+
+void OpenExplorerSelectPath(const std::wstring& filePath)
+{
+	if (filePath.empty())
+	{
+		return;
+	}
+
+	std::wstring explorerArgs = L"/select,\"" + filePath + L"\"";
+	(void)ShellExecuteW(nullptr, L"open", L"explorer.exe", explorerArgs.c_str(), nullptr, SW_SHOWNORMAL);
+}
+
+bool FileExists(const std::wstring& filePath)
+{
+	std::error_code errorCode;
+	return std::fs::exists(std::fs::path(filePath), errorCode);
+}
