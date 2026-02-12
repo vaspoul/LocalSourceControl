@@ -22,6 +22,99 @@ std::wstring INIPath()
 	return (settingsDir / L"settings.ini").wstring();
 }
 
+static void SanitizeWindowPlacement(Settings& settings)
+{
+	int virtualDesktopLeft = GetSystemMetrics(SM_XVIRTUALSCREEN);
+	int virtualDesktopTop = GetSystemMetrics(SM_YVIRTUALSCREEN);
+	int virtualDesktopWidth = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+	int virtualDesktopHeight = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+
+	if (virtualDesktopWidth <= 0 || virtualDesktopHeight <= 0)
+	{
+		return;
+	}
+
+	RECT virtualDesktopRect = {};
+	virtualDesktopRect.left = virtualDesktopLeft;
+	virtualDesktopRect.top = virtualDesktopTop;
+	virtualDesktopRect.right = virtualDesktopLeft + virtualDesktopWidth;
+	virtualDesktopRect.bottom = virtualDesktopTop + virtualDesktopHeight;
+
+	const int minWindowWidth = 640;
+	const int minWindowHeight = 360;
+
+	int windowWidth = settings.winW;
+	int windowHeight = settings.winH;
+
+	if (windowWidth < minWindowWidth)
+	{
+		windowWidth = minWindowWidth;
+	}
+	if (windowHeight < minWindowHeight)
+	{
+		windowHeight = minWindowHeight;
+	}
+
+	if (windowWidth > virtualDesktopWidth)
+	{
+		windowWidth = virtualDesktopWidth;
+	}
+	if (windowHeight > virtualDesktopHeight)
+	{
+		windowHeight = virtualDesktopHeight;
+	}
+
+	int windowLeft = settings.winX;
+	int windowTop = settings.winY;
+
+	RECT windowRect = {};
+	windowRect.left = windowLeft;
+	windowRect.top = windowTop;
+	windowRect.right = windowLeft + windowWidth;
+	windowRect.bottom = windowTop + windowHeight;
+
+	RECT intersectionRect = {};
+	BOOL intersects = IntersectRect(&intersectionRect, &windowRect, &virtualDesktopRect);
+
+	if (!intersects)
+	{
+		// Window is entirely off-screen -> center it on the virtual desktop
+		windowLeft = virtualDesktopRect.left + (virtualDesktopWidth - windowWidth) / 2;
+		windowTop = virtualDesktopRect.top + (virtualDesktopHeight - windowHeight) / 2;
+
+		windowRect.left = windowLeft;
+		windowRect.top = windowTop;
+		windowRect.right = windowLeft + windowWidth;
+		windowRect.bottom = windowTop + windowHeight;
+	}
+
+	// Clamp position so the window stays fully within the virtual desktop
+	int maxLeft = virtualDesktopRect.right - windowWidth;
+	int maxTop = virtualDesktopRect.bottom - windowHeight;
+
+	if (windowLeft < virtualDesktopRect.left)
+	{
+		windowLeft = virtualDesktopRect.left;
+	}
+	if (windowTop < virtualDesktopRect.top)
+	{
+		windowTop = virtualDesktopRect.top;
+	}
+	if (windowLeft > maxLeft)
+	{
+		windowLeft = maxLeft;
+	}
+	if (windowTop > maxTop)
+	{
+		windowTop = maxTop;
+	}
+
+	settings.winX = windowLeft;
+	settings.winY = windowTop;
+	settings.winW = windowWidth;
+	settings.winH = windowHeight;
+}
+
 void SaveSettings()
 {
 	std::wstring iniPath = INIPath();
@@ -41,6 +134,7 @@ void SaveSettings()
 	WriteText("Y=" + std::to_string(g_settings.winY) + "\n");
 	WriteText("W=" + std::to_string(g_settings.winW) + "\n");
 	WriteText("H=" + std::to_string(g_settings.winH) + "\n\n");
+	WriteText("MinimizeOnClose=" + std::to_string(g_settings.minimizeOnClose ? 1 : 0) + "\n");
 
 	WriteText("[Backup]\n");
 	WriteText("Root=" + WToUTF8(g_settings.backupRoot) + "\n");
@@ -165,6 +259,8 @@ void LoadSettings()
 	loadedSettings.winY = std::stoi(GetINIValue(parsedIni, "Window", "Y", std::to_string(loadedSettings.winY)));
 	loadedSettings.winW = std::stoi(GetINIValue(parsedIni, "Window", "W", std::to_string(loadedSettings.winW)));
 	loadedSettings.winH = std::stoi(GetINIValue(parsedIni, "Window", "H", std::to_string(loadedSettings.winH)));
+	loadedSettings.minimizeOnClose = GetINIValue(parsedIni, "Window", "MinimizeOnClose", "1") != "0";
+
 
 	loadedSettings.backupRoot = UTF8ToW(GetINIValue(parsedIni, "Backup", "Root", WToUTF8(loadedSettings.backupRoot)));
 	loadedSettings.maxBackupSizeMB = (uint32_t)std::stoul(GetINIValue(parsedIni, "Backup", "MaxSizeMB", std::to_string(loadedSettings.maxBackupSizeMB)));
@@ -189,6 +285,8 @@ void LoadSettings()
 			loadedSettings.watched.push_back(watchedFolder);
 		}
 	}
+
+	SanitizeWindowPlacement(loadedSettings);
 
 	g_settings = loadedSettings;
 }

@@ -94,35 +94,26 @@ std::vector<std::wstring> SplitCSV(const std::wstring& csv)
 	return out;
 }
 
-bool ContainsAllKeywords(const std::string& phrase, const std::string& keywords)
+bool ContainsAllKeywords(const std::wstring& phrase, const std::wstring& keywords)
 {
 	if (keywords.empty())
 	{
 		return true;
 	}
 
-	// Lowercase phrase internally
-	std::string phraseLower = ToLower(phrase);
+	std::wstring haystackLower = ToLower(phrase);
 
-	// Convert keywords to wide and split using same token logic
-	std::wstring keywordsW = UTF8ToW(keywords);
-	std::vector<std::wstring> tokensW = SplitCSV(keywordsW);
+	std::vector<std::wstring> tokens = SplitCSV(keywords);
 
-	if (tokensW.empty())
+	for (const std::wstring& keywordRaw : tokens)
 	{
-		return true;
-	}
-
-	for (const std::wstring& tokenW : tokensW)
-	{
-		std::string token = ToLower(WToUTF8(tokenW));
-
-		if (token.empty())
+		std::wstring keyword = ToLower(Trim(keywordRaw));
+		if (keyword.empty())
 		{
 			continue;
 		}
 
-		if (phraseLower.find(token) == std::string::npos)
+		if (haystackLower.find(keyword) == std::wstring::npos)
 		{
 			return false;
 		}
@@ -207,6 +198,19 @@ bool InputTextStdString(const char* label, std::string& s, ImGuiInputTextFlags f
 		}, (void*)&s);
 }
 
+bool InputTextStdString(const char* label, std::wstring& value, ImGuiInputTextFlags flags)
+{
+	std::string utf8Value = WToUTF8(value);
+
+	bool changed = ImGui::InputTextStdString(label, utf8Value, flags);
+	if (changed)
+	{
+		value = UTF8ToW(utf8Value);
+	}
+
+	return changed;
+}
+
 void HelpTooltip(const char* text)
 {
 	ImGui::SameLine();
@@ -260,6 +264,12 @@ bool TextClickable(const char* fmt, ...)
 		ImGui::PopStyleColor();
 
 	return ImGui::IsItemClicked();
+}
+
+bool TextClickable(const std::wstring& text)
+{
+	std::string utf8Text = WToUTF8(text);
+	return TextClickable("%s", utf8Text.c_str());
 }
 
 } // namespace ImGui

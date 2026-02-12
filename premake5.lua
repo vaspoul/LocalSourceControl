@@ -69,7 +69,7 @@ project("LocalSourceControl")
 
 	filter {}
 
-	files({ "**.h", "**.cpp", "**.resx" })
+	files({ "**.h", "**.cpp", "**.rc" })
 	
 	links( {"comctl32.lib"} )
 

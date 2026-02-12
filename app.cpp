@@ -1,6 +1,7 @@
 #include "main.h"
 #include "app.h"
 #include "settings.h"
+#include "resource.h"
 #include "imgui/imgui_impl_win32.h"
 #include "imgui/imgui_impl_dx11.h"
 
@@ -16,6 +17,14 @@ static ID3D11Device*			g_pd3dDevice = nullptr;
 static ID3D11DeviceContext*		g_pd3dDeviceContext = nullptr;
 static IDXGISwapChain*			g_pSwapChain = nullptr;
 static ID3D11RenderTargetView*	g_mainRenderTargetView = nullptr;
+static const UINT				kTrayIconId = 1;
+static const UINT				kTrayCallbackMessage = WM_APP + 1;
+static const UINT				kTrayMenuRestoreId = 1001;
+static const UINT				kTrayMenuExitId = 1002;
+static bool						g_isInTray = false;
+static NOTIFYICONDATAW			g_trayIconData = {};
+static HICON					g_trayIconHandle = nullptr;
+
 
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -107,6 +116,94 @@ static void CleanupDeviceD3D()
 	}
 }
 
+static void TrayAdd()
+{
+	if (g_isInTray)
+	{
+		return;
+	}
+
+	if (!g_trayIconHandle)
+	{
+		// Prefer your embedded icon resource if you have it (IDI_APP_ICON).
+		// Otherwise fall back to default application icon.
+		g_trayIconHandle = (HICON)LoadImageW(
+			GetModuleHandleW(nullptr),
+			MAKEINTRESOURCEW(IDI_APP_ICON),
+			IMAGE_ICON,
+			GetSystemMetrics(SM_CXSMICON),
+			GetSystemMetrics(SM_CYSMICON),
+			0);
+
+		if (!g_trayIconHandle)
+		{
+			g_trayIconHandle = LoadIconW(nullptr, IDI_APPLICATION);
+		}
+	}
+
+	ZeroMemory(&g_trayIconData, sizeof(g_trayIconData));
+	g_trayIconData.cbSize = sizeof(g_trayIconData);
+	g_trayIconData.hWnd = g_hWnd;
+	g_trayIconData.uID = kTrayIconId;
+	g_trayIconData.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+	g_trayIconData.uCallbackMessage = kTrayCallbackMessage;
+	g_trayIconData.hIcon = g_trayIconHandle;
+	wcscpy_s(g_trayIconData.szTip, L"LocalSourceControl");
+
+	Shell_NotifyIconW(NIM_ADD, &g_trayIconData);
+
+	g_isInTray = true;
+}
+
+static void TrayRemove()
+{
+	if (!g_isInTray)
+	{
+		return;
+	}
+
+	Shell_NotifyIconW(NIM_DELETE, &g_trayIconData);
+	g_isInTray = false;
+
+	ZeroMemory(&g_trayIconData, sizeof(g_trayIconData));
+}
+
+static void TrayShowContextMenu(HWND windowHandle)
+{
+	POINT cursorPos = {};
+	GetCursorPos(&cursorPos);
+
+	HMENU menuHandle = CreatePopupMenu();
+	if (!menuHandle)
+	{
+		return;
+	}
+
+	InsertMenuW(menuHandle, (UINT)-1, MF_BYPOSITION | MF_STRING, kTrayMenuRestoreId, L"Restore");
+	InsertMenuW(menuHandle, (UINT)-1, MF_BYPOSITION | MF_STRING, kTrayMenuExitId, L"Exit");
+
+	// Required so the menu dismisses correctly when clicking elsewhere.
+	SetForegroundWindow(windowHandle);
+
+	TrackPopupMenu(
+		menuHandle,
+		TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_LEFTALIGN,
+		cursorPos.x,
+		cursorPos.y,
+		0,
+		windowHandle,
+		nullptr);
+
+	DestroyMenu(menuHandle);
+}
+
+static void RestoreFromTray(HWND windowHandle)
+{
+	ShowWindow(windowHandle, SW_SHOW);
+	ShowWindow(windowHandle, SW_RESTORE);
+	SetForegroundWindow(windowHandle);
+}
+
 int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
 {
 	HRESULT hrCo = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
@@ -116,11 +213,12 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
 
 	WNDCLASSEXW wc = {};
 	wc.cbSize = sizeof(WNDCLASSEXW);
-	wc.style = CS_CLASSDC;
+	wc.style = CS_CLASSDC | CS_DBLCLKS;
 	wc.lpfnWndProc = WndProc;
 	wc.hInstance = hInstance;
 	wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
 	wc.lpszClassName = L"ContinuousBackupDX11Wnd";
+	wc.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_APP_ICON));
 
 	RegisterClassExW(&wc);
 
@@ -129,7 +227,7 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
 
 	g_hWnd = CreateWindowW(
 		wc.lpszClassName,
-		L"Continuous Backup (DX11)",
+		L"Continuous Backup",
 		WS_OVERLAPPEDWINDOW,
 		g_settings.winX,
 		g_settings.winY,
@@ -151,6 +249,8 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
 
 	ShowWindow(g_hWnd, SW_SHOWDEFAULT);
 	UpdateWindow(g_hWnd);
+	
+	TrayAdd();
 
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();
@@ -288,6 +388,13 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 				UpdateWindowSettingsFromHWND(hWnd);
 				MaybeSaveSettingsThrottled();
 			}
+
+			if (wParam == SIZE_MINIMIZED)
+			{
+				ShowWindow(hWnd, SW_HIDE);
+				return 0;
+			}
+
 		} return 0;
 
 		case WM_SYSCOMMAND:
@@ -300,9 +407,54 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
 		case WM_DESTROY:
 		{
+			TrayRemove();
 			PostQuitMessage(0);
 			return 0;
 		}
+
+		case WM_CLOSE:
+		{
+			if (g_settings.minimizeOnClose)
+			{
+				ShowWindow(hWnd, SW_HIDE);
+				return 0;
+			}
+
+			DestroyWindow(hWnd);
+			return 0;
+		}
+
+
+		case kTrayCallbackMessage:
+		{
+			if (lParam == WM_LBUTTONDBLCLK || lParam == WM_LBUTTONUP || lParam == NIN_SELECT)
+			{
+				RestoreFromTray(hWnd);
+				return 0;
+			}
+			else  if (lParam == WM_RBUTTONUP || lParam == WM_CONTEXTMENU)
+			{
+				TrayShowContextMenu(hWnd);
+				return 0;
+			}
+		} break;
+
+		case WM_COMMAND:
+		{
+			UINT commandId = LOWORD(wParam);
+
+			if (commandId == kTrayMenuRestoreId)
+			{
+				RestoreFromTray(hWnd);
+				return 0;
+			}
+			if (commandId == kTrayMenuExitId)
+			{
+				DestroyWindow(hWnd);
+				return 0;
+			}
+		} break;
+
 	}
 
 	return DefWindowProcW(hWnd, msg, wParam, lParam);
@@ -405,6 +557,7 @@ std::wstring BrowseForExeFile()
 
 			if (SUCCEEDED(shellItemResult) && defaultFolderItem)
 			{
+				fileDialog->SetFolder(defaultFolderItem);
 				fileDialog->SetDefaultFolder(defaultFolderItem);
 				defaultFolderItem->Release();
 			}

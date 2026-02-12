@@ -4,6 +4,7 @@
 #include "app.h"
 #include "util.h"
 #include "settings.h"
+#include "imgui/imgui_internal.h"
 
 struct BackupOperation
 {
@@ -54,6 +55,88 @@ static std::wstring SanitizePathForBackup(const std::wstring& absolutePath)
 	}
 
 	return sanitizedPath;
+}
+
+static std::wstring UnsanitizePathFromBackupLayout(const std::wstring& relativePathUnderBackupRoot)
+{
+	// Expected: "C\temp\file.txt" -> "C:\temp\file.txt"
+	// Best-effort. Also normalizes '/' to '\'.
+	std::wstring out = relativePathUnderBackupRoot;
+
+	for (wchar_t& currentChar : out)
+	{
+		if (currentChar == L'/')
+		{
+			currentChar = L'\\';
+		}
+	}
+
+	if (out.size() >= 2)
+	{
+		wchar_t driveLetter = out[0];
+		wchar_t slashChar = out[1];
+
+		if (((driveLetter >= L'A' && driveLetter <= L'Z') || (driveLetter >= L'a' && driveLetter <= L'z')) &&
+			(slashChar == L'\\'))
+		{
+			out.insert(1, L":");
+		}
+	}
+
+	return out;
+}
+
+static bool ParseBackupTimestamp(const std::wstring& backupFileName, std::wstring& outDate, std::wstring& outTime)
+{
+	size_t markerPos = backupFileName.rfind(L"_backup_");
+	if (markerPos == std::wstring::npos)
+	{
+		return false;
+	}
+
+	std::wstring stamp = backupFileName.substr(markerPos + 8);
+
+	int year = 0, month = 0, day = 0;
+	int hour = 0, minute = 0, second = 0;
+
+	if (swscanf_s(
+		stamp.c_str(),
+		L"%4d_%2d_%2d__%2d_%2d_%2d",
+		&year, &month, &day,
+		&hour, &minute, &second) != 6)
+	{
+		return false;
+	}
+
+	month = std::max(0, std::min(12, month));
+
+	wchar_t dateBuffer[64] = {};
+	wchar_t timeBuffer[64] = {};
+
+	static const wchar_t* monthNames[12] =
+	{
+		L"Jan", L"Feb", L"Mar", L"Apr", L"May", L"Jun",
+		L"Jul", L"Aug", L"Sep", L"Oct", L"Nov", L"Dec"
+	};
+
+	swprintf_s(
+		dateBuffer,
+		L"%02d/%s/%04d",
+		day,
+		monthNames[month],
+		year);
+
+	swprintf_s(
+		timeBuffer,
+		L"%02d:%02d:%02d",
+		hour,
+		minute,
+		second);
+
+	outDate = dateBuffer;
+	outTime = timeBuffer;
+
+	return true;
 }
 
 static void PushOperation(const BackupOperation& backupOperation)
@@ -419,11 +502,13 @@ static void ScanBackupFolder()
 			continue;
 		}
 
-		std::fs::path originalPath = relativeDir / std::fs::path(originalStem + originalExt);
+		std::fs::path originalRelativePath = relativeDir / std::fs::path(originalStem + originalExt);
+		
+		std::wstring originalFullPath = UnsanitizePathFromBackupLayout(originalRelativePath.wstring());
 
 		{
 			std::unique_lock<std::shared_mutex> lock(g_indexMutex);
-			g_backupIndex[originalPath.wstring()].push_back(backupFilePath.wstring());
+			g_backupIndex[originalFullPath].push_back(backupFilePath.wstring());
 		}
 	}
 
@@ -536,11 +621,15 @@ static void WatchThreadProc(FolderWatcher* watcher)
 
 			if (isInteresting)
 			{
-				if (PassesFilters(watchedFolder, fullPath))
+				// Exclude anything inside backup root
+				if (!IsPathUnderRoot(fullPath, g_settings.backupRoot))
 				{
-					if (!SkipBackup(*watcher, fullPath, nowTick))
+					if (PassesFilters(watchedFolder, fullPath))
 					{
-						CopyToBackupAndIndex(watchedFolder, fullPath);
+						if (!SkipBackup(*watcher, fullPath, nowTick))
+						{
+							CopyToBackupAndIndex(watchedFolder, fullPath);
+						}
 					}
 				}
 			}
@@ -592,6 +681,57 @@ static void StartWatchersFromSettings()
 		folderWatcher->workerThread = std::thread(WatchThreadProc, folderWatcher.get());
 
 		g_watchers.push_back(std::move(folderWatcher));
+	}
+}
+
+void LaunchDiffTool(const std::wstring& diffToolPath, const std::wstring& backupFilePath, const std::wstring& originalFilePath)
+{
+	if (diffToolPath.empty())
+	{
+		BackupOperation backupOperation = {};
+		backupOperation.timeStamp = MakeTimestampStr();
+		backupOperation.originalPath = originalFilePath;
+		backupOperation.backupPath = backupFilePath;
+		backupOperation.result = L"Diff tool not set";
+		PushOperation(backupOperation);
+		return;
+	}
+
+	if (!FileExists(diffToolPath))
+	{
+		BackupOperation backupOperation = {};
+		backupOperation.timeStamp = MakeTimestampStr();
+		backupOperation.originalPath = originalFilePath;
+		backupOperation.backupPath = backupFilePath;
+		backupOperation.result = L"Diff tool path does not exist";
+		PushOperation(backupOperation);
+		return;
+	}
+
+	if (backupFilePath.empty() || originalFilePath.empty())
+	{
+		return;
+	}
+
+	// Convention: diffTool.exe "<backup>" "<original>"
+	std::wstring parameters = L"\"" + backupFilePath + L"\"" + L" " + L"\"" + originalFilePath + L"\"";
+
+	HINSTANCE resultHandle = ShellExecuteW(
+		nullptr,
+		L"open",
+		diffToolPath.c_str(),
+		parameters.c_str(),
+		nullptr,
+		SW_SHOWNORMAL);
+
+	if ((INT_PTR)resultHandle <= 32)
+	{
+		BackupOperation backupOperation = {};
+		backupOperation.timeStamp = MakeTimestampStr();
+		backupOperation.originalPath = originalFilePath;
+		backupOperation.backupPath = backupFilePath;
+		backupOperation.result = L"Failed to launch diff tool";
+		PushOperation(backupOperation);
 	}
 }
 
@@ -709,9 +849,48 @@ static void UI_WatchedFolders()
 	}
 }
 
+static bool HandleRowSelectAndHighlight(int rowIndex, int& selectedRowIndex, float rowMinY, float rowMaxY)
+{
+	ImGuiWindow* window = ImGui::GetCurrentWindow();
+
+	if (!window)
+	{
+		return false;
+	}
+
+	ImVec2 windowPos = window->Pos;
+	ImVec2 contentMin = ImGui::GetWindowContentRegionMin();
+	ImVec2 contentMax = ImGui::GetWindowContentRegionMax();
+
+	ImVec2 rowMin(windowPos.x + contentMin.x, rowMinY);
+	ImVec2 rowMax(windowPos.x + contentMax.x, rowMaxY);
+
+	bool isHovered = ImGui::IsMouseHoveringRect(rowMin, rowMax, false);
+
+	if (isHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+	{
+		selectedRowIndex = rowIndex;
+		return true;
+	}
+
+	if (rowIndex == selectedRowIndex)
+	{
+		ImU32 bgColor = ImGui::GetColorU32(ImGuiCol_Header);
+		ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, bgColor);
+	}
+	else if (isHovered)
+	{
+		ImU32 hoverColor = ImGui::GetColorU32(ImGuiCol_HeaderHovered);
+		ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, hoverColor);
+	}
+
+	return false;
+}
+
 static void UI_BackedUpFiles()
 {
-	static std::string searchText;
+	static std::wstring searchText;
+	static int selectedRowIndex = -1;
 
 	ImGui::TextUnformatted("Search");
 	ImGui::HelpTooltip("Search is split into keywords (whitespace, comma, semicolon).\nAll keywords must appear as substrings.\nExample: \"foo bar\" matches \"foontarbartastic\".");
@@ -720,71 +899,159 @@ static void UI_BackedUpFiles()
 
 	ImGui::Separator();
 
-	if (ImGui::BeginTable("backups", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY))
+	bool isCtrlDown = ImGui::GetIO().KeyCtrl;
+	bool isDiffPressed = isCtrlDown && ImGui::IsKeyPressed(ImGuiKey_D, false);
+
+	std::wstring selectedOriginalPath;
+	std::wstring selectedBackupPath;
+	bool hasSelection = false;
+
+	if (ImGui::BeginTable("backups_detailed", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY))
 	{
-		ImGui::TableSetupColumn("File");
-		ImGui::TableSetupColumn("Backups", ImGuiTableColumnFlags_WidthFixed, 90.0f);
-		ImGui::TableSetupColumn("Last backup", ImGuiTableColumnFlags_WidthFixed, 220.0f);
+		ImGui::TableSetupColumn("Original");
+		ImGui::TableSetupColumn("Date", ImGuiTableColumnFlags_WidthFixed, 110.0f);
+		ImGui::TableSetupColumn("Time", ImGuiTableColumnFlags_WidthFixed, 90.0f);
+		ImGui::TableSetupColumn("Backup");
 		ImGui::TableHeadersRow();
 
-		std::shared_lock<std::shared_mutex> lock(g_indexMutex);
+		std::shared_lock<std::shared_mutex> indexLock(g_indexMutex);
 
-		for (const auto& kv : g_backupIndex)
+		int rowIndex = 0;
+
+		for (const auto& indexPair : g_backupIndex)
 		{
-			const std::wstring& originalPath = kv.first;
-			const auto& backupPaths = kv.second;
+			const std::wstring& originalPath = indexPair.first;
+			const std::vector<std::wstring>& backupPaths = indexPair.second;
 
-			std::string originalPathUtf8 = WToUTF8(originalPath);
-
-			if (!searchText.empty())
+			for (const std::wstring& backupPath : backupPaths)
 			{
-				// ContainsAllKeywords lowercases internally now
-				if (!ContainsAllKeywords(originalPathUtf8, searchText))
-				{
+				if (!ContainsAllKeywords(backupPath, searchText))
 					continue;
-				}
-			}
 
-			ImGui::TableNextRow();
+				ImGui::PushID(rowIndex);
 
-			ImGui::TableSetColumnIndex(0);
-			ImGui::TextUnformatted(originalPathUtf8.c_str());
+				ImGui::TableNextRow();
 
-			ImGui::TableSetColumnIndex(1);
-			ImGui::Text("%d", (int)backupPaths.size());
+				float rowMinY = ImGui::GetCursorScreenPos().y;
 
-			ImGui::TableSetColumnIndex(2);
-			if (!backupPaths.empty())
-			{
-				const std::wstring& lastBackupPath = backupPaths.back();
-				std::wstring backupFileName = std::fs::path(lastBackupPath).filename().wstring();
-
-				size_t markerPos = backupFileName.rfind(L"_backup_");
-				if (markerPos != std::wstring::npos)
+				ImGui::TableNextColumn();
 				{
-					std::wstring stampPlus = backupFileName.substr(markerPos + 8);
-					ImGui::TextUnformatted(WToUTF8(stampPlus).c_str());
+					ImGui::TextClickable(originalPath);
+
+					if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+					{
+						selectedRowIndex = rowIndex;
+						if (!originalPath.empty())
+						{
+							OpenFileWithShell(originalPath);
+						}
+					}
+
+					if (ImGui::BeginPopupContextItem("original_context"))
+					{
+						if (ImGui::MenuItem("Open in Explorer"))
+						{
+							selectedRowIndex = rowIndex;
+							OpenExplorerSelectPath(originalPath);
+						}
+						ImGui::EndPopup();
+					}
 				}
-				else
+
 				{
-					ImGui::TextUnformatted("-");
+					std::wstring backupFileName = std::fs::path(backupPath).filename().wstring();
+
+					std::wstring dateText;
+					std::wstring timeText;
+
+					if (ParseBackupTimestamp(backupFileName, dateText, timeText))
+					{
+						ImGui::TableNextColumn();
+						ImGui::TextUnformatted(WToUTF8(dateText).c_str());
+
+						ImGui::TableNextColumn();
+						ImGui::TextUnformatted(WToUTF8(timeText).c_str());
+					}
+					else
+					{
+						ImGui::TableNextColumn();
+						ImGui::TextUnformatted("-");
+
+						ImGui::TableNextColumn();
+						ImGui::TextUnformatted("-");
+					}
 				}
-			}
-			else
-			{
-				ImGui::TextUnformatted("-");
+
+				ImGui::TableNextColumn();
+				{
+					std::string backupPathUtf8 = WToUTF8(backupPath);
+
+					ImGui::TextClickable("%s", backupPathUtf8.c_str());
+
+					if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+					{
+						selectedRowIndex = rowIndex;
+						if (!backupPath.empty())
+						{
+							OpenFileWithShell(backupPath);
+						}
+					}
+
+					if (ImGui::BeginPopupContextItem("backup_context"))
+					{
+						if (ImGui::MenuItem("Open in Explorer"))
+						{
+							selectedRowIndex = rowIndex;
+							OpenExplorerSelectPath(backupPath);
+						}
+						ImGui::EndPopup();
+					}
+				}
+
+				float rowMaxY = ImGui::GetCursorScreenPos().y;
+
+				HandleRowSelectAndHighlight(rowIndex, selectedRowIndex, rowMinY, rowMaxY);
+
+				if (rowIndex == selectedRowIndex)
+				{
+					selectedOriginalPath = originalPath;
+					selectedBackupPath = backupPath;
+					hasSelection = true;
+				}
+
+				ImGui::PopID();
+
+				++rowIndex;
 			}
 		}
 
 		ImGui::EndTable();
 	}
+
+	if (isDiffPressed && hasSelection)
+	{
+		LaunchDiffTool(g_settings.diffToolPath, selectedBackupPath, selectedOriginalPath);
+	}
 }
 
 static void UI_History()
 {
+	static int selectedOperationIndex = -1;
+
 	ImGui::Text("Last %d operations", kOperationHistoryMaxCount);
-	ImGui::HelpTooltip("Shows copy successes/failures and reasons for skips.");
+	ImGui::HelpTooltip(
+		"Click a row to select it.\n"
+		"Click paths to open them.\n"
+		"Right-click a path for Explorer options.\n"
+		"Ctrl+D diffs the selected backup against the current file.");
+
 	ImGui::Separator();
+
+	bool isCtrlDown = ImGui::GetIO().KeyCtrl;
+	bool isDiffPressed = isCtrlDown && ImGui::IsKeyPressed(ImGuiKey_D, false);
+
+	BackupOperation selectedOperationCopy = {};
+	bool hasSelectedOperation = false;
 
 	if (ImGui::BeginTable("ops", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY))
 	{
@@ -796,24 +1063,93 @@ static void UI_History()
 
 		std::lock_guard<std::mutex> lock(g_operationsMutex);
 
-		for (const auto& backupOperation : g_operations)
+		for (int operationIndex = 0; operationIndex < (int)g_operations.size(); ++operationIndex)
 		{
+			const BackupOperation& backupOperation = g_operations[operationIndex];
+
+			ImGui::PushID(operationIndex);
+
 			ImGui::TableNextRow();
+
+			float rowMinY = ImGui::GetCursorScreenPos().y;
 
 			ImGui::TableSetColumnIndex(0);
 			ImGui::TextUnformatted(WToUTF8(backupOperation.timeStamp).c_str());
 
 			ImGui::TableSetColumnIndex(1);
-			ImGui::TextUnformatted(WToUTF8(backupOperation.originalPath).c_str());
+			{
+				std::string originalUtf8 = WToUTF8(backupOperation.originalPath);
+
+				ImGui::TextClickable("%s", originalUtf8.c_str());
+
+				if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+				{
+					selectedOperationIndex = operationIndex;
+					if (!backupOperation.originalPath.empty())
+					{
+						OpenFileWithShell(backupOperation.originalPath);
+					}
+				}
+
+				if (ImGui::BeginPopupContextItem("original_context"))
+				{
+					if (ImGui::MenuItem("Open in Explorer"))
+					{
+						selectedOperationIndex = operationIndex;
+						OpenExplorerSelectPath(backupOperation.originalPath);
+					}
+					ImGui::EndPopup();
+				}
+			}
 
 			ImGui::TableSetColumnIndex(2);
-			ImGui::TextUnformatted(WToUTF8(backupOperation.backupPath).c_str());
+			{
+				std::string backupUtf8 = WToUTF8(backupOperation.backupPath);
+
+				ImGui::TextClickable("%s", backupUtf8.c_str());
+
+				if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+				{
+					selectedOperationIndex = operationIndex;
+					if (!backupOperation.backupPath.empty())
+					{
+						OpenFileWithShell(backupOperation.backupPath);
+					}
+				}
+
+				if (ImGui::BeginPopupContextItem("backup_context"))
+				{
+					if (ImGui::MenuItem("Open in Explorer"))
+					{
+						selectedOperationIndex = operationIndex;
+						OpenExplorerSelectPath(backupOperation.backupPath);
+					}
+					ImGui::EndPopup();
+				}
+			}
 
 			ImGui::TableSetColumnIndex(3);
 			ImGui::TextUnformatted(WToUTF8(backupOperation.result).c_str());
+
+			float rowMaxY = ImGui::GetCursorScreenPos().y;
+
+			HandleRowSelectAndHighlight(operationIndex, selectedOperationIndex, rowMinY, rowMaxY);
+
+			if (operationIndex == selectedOperationIndex)
+			{
+				selectedOperationCopy = backupOperation;
+				hasSelectedOperation = true;
+			}
+
+			ImGui::PopID();
 		}
 
 		ImGui::EndTable();
+	}
+
+	if (isDiffPressed && hasSelectedOperation)
+	{
+		LaunchDiffTool(g_settings.diffToolPath, selectedOperationCopy.backupPath, selectedOperationCopy.originalPath);
 	}
 }
 
@@ -832,7 +1168,7 @@ static void UI_Settings()
 
 	ImGui::TextUnformatted("Backup folder");
 
-	if (ImGui::Button("Browse Backup Folder"))
+	if (ImGui::Button("Select Backup Folder"))
 	{
 		std::wstring selectedPath = BrowseForFolder(L"Select backup folder");
 
@@ -850,6 +1186,19 @@ static void UI_Settings()
 	}
 
 	ImGui::HelpTooltip("Backups are nested by original path under this root.");
+
+	ImGui::SameLine();
+
+	if (ImGui::Button("Open Backup Folder"))
+	{
+		if (!g_settings.backupRoot.empty())
+		{
+			(void)ShellExecuteW(nullptr, L"open", g_settings.backupRoot.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+		}
+	}
+
+	ImGui::HelpTooltip("Opens the backup root folder in Explorer.");
+
 
 	ImGui::SetNextItemWidth(-1.0f);
 	if (ImGui::InputTextStdString("##backupRoot", backupRootUtf8))
@@ -908,6 +1257,57 @@ static void UI_Settings()
 	{
 		ScanBackupFolder();
 	}
+
+	ImGui::Separator();
+
+	static std::string diffToolUtf8;
+	if (diffToolUtf8.empty())
+	{
+		diffToolUtf8 = WToUTF8(g_settings.diffToolPath);
+		if (diffToolUtf8.capacity() < 512)
+		{
+			diffToolUtf8.reserve(512);
+		}
+	}
+
+	ImGui::TextUnformatted("Diff tool executable");
+	ImGui::HelpTooltip(
+		"Used by Ctrl+D in Backup History.\n"
+		"The tool is launched as:\n"
+		"  <diffTool.exe> \"<backup>\" \"<original>\"\n"
+		"Pick a diff tool that accepts two file arguments.");
+
+	if (ImGui::Button("Browse Diff Tool"))
+	{
+		std::wstring selectedExePath = BrowseForExeFile();
+		if (!selectedExePath.empty())
+		{
+			g_settings.diffToolPath = selectedExePath;
+			diffToolUtf8 = WToUTF8(g_settings.diffToolPath);
+
+			MarkSettingsDirty();
+			SaveSettings();
+		}
+	}
+
+	ImGui::SameLine();
+	ImGui::SetNextItemWidth(-1.0f);
+
+	if (ImGui::InputTextStdString("##diffTool", diffToolUtf8))
+	{
+		g_settings.diffToolPath = UTF8ToW(diffToolUtf8);
+		MarkSettingsDirty();
+	}
+
+	ImGui::Separator();
+
+	if (ImGui::Checkbox("Minimize to tray when closing window", &g_settings.minimizeOnClose))
+	{
+		MarkSettingsDirty();
+	}
+
+	ImGui::HelpTooltip("When enabled, clicking the window close button (X) hides the app to the system tray instead of exiting.");
+
 }
 
 void AppInit()
@@ -957,3 +1357,4 @@ void AppShutdown()
 {
 	StopWatchers();
 }
+
