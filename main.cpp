@@ -25,15 +25,15 @@ struct FolderWatcher
 	std::unordered_map<std::wstring, uint64_t>	lastEventTickByPath;
 };
 
-static std::mutex													g_operationsMutex;
-static std::vector<BackupOperation>									g_operations;
-static const uint32_t												kOperationHistoryMaxCount = 1024;
+static std::mutex											g_operationsMutex;
+static std::vector<BackupOperation>							g_operations;
+static const uint32_t										kOperationHistoryMaxCount = 1024;
 
-static std::shared_mutex											g_indexMutex;
-static std::unordered_map<std::wstring, std::vector<std::wstring>>	g_backupIndex;
+static std::shared_mutex									g_indexMutex;
+static std::map<std::wstring, std::vector<std::wstring>>	g_backupIndex;
 
-static std::mutex													g_watchersMutex;
-static std::vector<std::unique_ptr<FolderWatcher>>					g_watchers;
+static std::mutex											g_watchersMutex;
+static std::vector<std::unique_ptr<FolderWatcher>>			g_watchers;
 
 // Sanitize "C:\foo\bar" -> "C\foo\bar" so it can be nested under backup root
 static std::wstring SanitizePathForBackup(const std::wstring& absolutePath)
@@ -287,6 +287,11 @@ static void EnforcePerFileLimit_Locked(std::vector<std::wstring>& backupPaths, u
 static void EnforceGlobalSizeLimit(const std::fs::path& backupRootPath, uint32_t maxSizeMB)
 {
 	if (backupRootPath.empty())
+	{
+		return;
+	}
+
+	if (maxSizeMB == 0)
 	{
 		return;
 	}
@@ -887,152 +892,294 @@ static bool HandleRowSelectAndHighlight(int rowIndex, int& selectedRowIndex, flo
 	return false;
 }
 
+static std::wstring BackupTimestampFromBackupPath(const std::wstring& backupPath)
+{
+	std::wstring backupFileName = std::fs::path(backupPath).filename().wstring();
+
+	size_t markerPos = backupFileName.rfind(L"_backup_");
+	if (markerPos == std::wstring::npos)
+	{
+		return L"-";
+	}
+
+	return backupFileName.substr(markerPos + 8);
+}
+
 static void UI_BackedUpFiles()
 {
 	static std::wstring searchText;
-	static int selectedRowIndex = -1;
 
-	ImGui::TextUnformatted("Search");
-	ImGui::HelpTooltip("Search is split into keywords (whitespace, comma, semicolon).\nAll keywords must appear as substrings.\nExample: \"foo bar\" matches \"foontarbartastic\".");
-	ImGui::SetNextItemWidth(-1.0f);
+	static std::wstring selectedOriginalPath;
+	static std::wstring selectedBackupPath;
+
+	ImGui::TextUnformatted("Filter:");
+	ImGui::SameLine();
 	ImGui::InputTextStdString("##search", searchText);
+	ImGui::SameLine();
+	if (ImGui::Button("Clear"))
+	{
+		searchText.clear();
+	}
 
 	ImGui::Separator();
 
 	bool isCtrlDown = ImGui::GetIO().KeyCtrl;
 	bool isDiffPressed = isCtrlDown && ImGui::IsKeyPressed(ImGuiKey_D, false);
 
-	std::wstring selectedOriginalPath;
-	std::wstring selectedBackupPath;
-	bool hasSelection = false;
-
-	if (ImGui::BeginTable("backups_detailed", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY))
+	if (ImGui::BeginTable("backed_up_files", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY))
 	{
-		ImGui::TableSetupColumn("Original");
-		ImGui::TableSetupColumn("Date", ImGuiTableColumnFlags_WidthFixed, 110.0f);
-		ImGui::TableSetupColumn("Time", ImGuiTableColumnFlags_WidthFixed, 90.0f);
-		ImGui::TableSetupColumn("Backup");
+		ImGui::TableSetupColumn("Folder",   ImGuiTableColumnFlags_WidthStretch, 1.5f);
+		ImGui::TableSetupColumn("File", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+		ImGui::TableSetupColumn("Backups",  ImGuiTableColumnFlags_WidthStretch, 2.0f);
 		ImGui::TableHeadersRow();
 
 		std::shared_lock<std::shared_mutex> indexLock(g_indexMutex);
-
-		int rowIndex = 0;
 
 		for (const auto& indexPair : g_backupIndex)
 		{
 			const std::wstring& originalPath = indexPair.first;
 			const std::vector<std::wstring>& backupPaths = indexPair.second;
 
-			for (const std::wstring& backupPath : backupPaths)
+			if (backupPaths.empty())
+				continue;
+
+			if (!ContainsAllKeywords(originalPath, searchText))
 			{
-				if (!ContainsAllKeywords(backupPath, searchText))
-					continue;
+				continue;
+			}
 
-				ImGui::PushID(rowIndex);
+			ImGui::PushID(originalPath.data());
 
-				ImGui::TableNextRow();
+			std::fs::path originalFsPath(originalPath);
 
-				float rowMinY = ImGui::GetCursorScreenPos().y;
+			std::wstring originalNameWide = originalFsPath.filename().wstring();
+			std::wstring originalFolderWide = originalFsPath.parent_path().wstring();
 
-				ImGui::TableNextColumn();
+			std::string originalNameUtf8 = WToUTF8(originalNameWide);
+			std::string originalFolderUtf8 = WToUTF8(originalFolderWide);
+
+
+			ImGui::TableNextRow();
+
+			// -----------------------------------------------------------------
+			// original folder 
+			// -----------------------------------------------------------------
+
+			ImGui::TableNextColumn();
+
+			ImGui::TextClickable("%s", originalFolderUtf8.c_str());
+
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip("%s", originalFolderUtf8.c_str());
+			}
+
+			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+			{
+				OpenExplorerSelectPath(originalFolderWide);
+			}
+
+			if (ImGui::BeginPopupContextItem("folder_context"))
+			{
+				if (ImGui::MenuItem("Open in Explorer"))
 				{
-					ImGui::TextClickable(originalPath);
-
-					if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
-					{
-						selectedRowIndex = rowIndex;
-						if (!originalPath.empty())
-						{
-							OpenFileWithShell(originalPath);
-						}
-					}
-
-					if (ImGui::BeginPopupContextItem("original_context"))
-					{
-						if (ImGui::MenuItem("Open in Explorer"))
-						{
-							selectedRowIndex = rowIndex;
-							OpenExplorerSelectPath(originalPath);
-						}
-						ImGui::EndPopup();
-					}
+					OpenExplorerSelectPath(originalFolderWide);
 				}
+				ImGui::EndPopup();
+			}
 
-				{
-					std::wstring backupFileName = std::fs::path(backupPath).filename().wstring();
+			// -----------------------------------------------------------------
+			// original filename 
+			// -----------------------------------------------------------------
+			ImGui::TableNextColumn();
 
-					std::wstring dateText;
-					std::wstring timeText;
+			ImGui::TextClickable("%s", originalNameUtf8.c_str());
 
-					if (ParseBackupTimestamp(backupFileName, dateText, timeText))
-					{
-						ImGui::TableNextColumn();
-						ImGui::TextUnformatted(WToUTF8(dateText).c_str());
+			if (ImGui::IsItemHovered())
+			{
+				ImGui::SetTooltip("%s", WToUTF8(originalPath).c_str());
+			}
 
-						ImGui::TableNextColumn();
-						ImGui::TextUnformatted(WToUTF8(timeText).c_str());
-					}
-					else
-					{
-						ImGui::TableNextColumn();
-						ImGui::TextUnformatted("-");
+			if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+			{
+				selectedOriginalPath = originalPath;
+				selectedBackupPath.clear();
+				OpenFileWithShell(originalPath);
+			}
 
-						ImGui::TableNextColumn();
-						ImGui::TextUnformatted("-");
-					}
-				}
-
-				ImGui::TableNextColumn();
-				{
-					std::string backupPathUtf8 = WToUTF8(backupPath);
-
-					ImGui::TextClickable("%s", backupPathUtf8.c_str());
-
-					if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
-					{
-						selectedRowIndex = rowIndex;
-						if (!backupPath.empty())
-						{
-							OpenFileWithShell(backupPath);
-						}
-					}
-
-					if (ImGui::BeginPopupContextItem("backup_context"))
-					{
-						if (ImGui::MenuItem("Open in Explorer"))
-						{
-							selectedRowIndex = rowIndex;
-							OpenExplorerSelectPath(backupPath);
-						}
-						ImGui::EndPopup();
-					}
-				}
-
-				float rowMaxY = ImGui::GetCursorScreenPos().y;
-
-				HandleRowSelectAndHighlight(rowIndex, selectedRowIndex, rowMinY, rowMaxY);
-
-				if (rowIndex == selectedRowIndex)
+			if (ImGui::BeginPopupContextItem("original_context"))
+			{
+				if (ImGui::MenuItem("Open in Explorer"))
 				{
 					selectedOriginalPath = originalPath;
-					selectedBackupPath = backupPath;
-					hasSelection = true;
+					selectedBackupPath.clear();
+					OpenExplorerSelectPath(originalPath);
+				}
+				ImGui::EndPopup();
+			}
+
+			// -----------------------------------------------------------------
+			// Column 1: count + expand button + open explorer to latest backup
+			// -----------------------------------------------------------------
+			ImGui::TableNextColumn();
+
+			ImGuiStorage* storage = ImGui::GetStateStorage();
+			ImGuiID expandId = ImGui::GetID("expanded_state");
+			bool isExpanded = storage->GetBool(expandId, false);
+
+			ImGui::Text("%d", (int)backupPaths.size());
+			ImGui::SameLine();
+
+			const char* expandLabel = isExpanded ? "Collapse" : "Expand";
+			if (ImGui::SmallButton(expandLabel))
+			{
+				isExpanded = !isExpanded;
+				storage->SetBool(expandId, isExpanded);
+			}
+
+			ImGui::SameLine();
+
+			if (ImGui::SmallButton("Show Latest"))
+			{
+				const std::wstring& latestBackupPath = backupPaths.back();
+				OpenExplorerSelectPath(latestBackupPath);
+			}
+
+			ImGui::SameLine();
+
+			if (ImGui::SmallButton("Diff Latest"))
+			{
+				const std::wstring& latestBackupPath = backupPaths.back();
+				LaunchDiffTool(g_settings.diffToolPath, latestBackupPath, selectedOriginalPath);
+			}
+
+			// Expanded list
+			if (isExpanded)
+			{
+				ImGui::Separator();
+
+				float lineHeight = ImGui::GetTextLineHeightWithSpacing();
+				float desiredHeight = (float)backupPaths.size() * lineHeight + lineHeight * 2.0f;
+				float maxHeight = 260.0f;
+
+				float childHeight = desiredHeight;
+				if (childHeight > maxHeight)
+				{
+					childHeight = maxHeight;
 				}
 
-				ImGui::PopID();
+				ImGui::BeginChild("##backup_list_child", ImVec2(0.0f, childHeight), true, ImGuiWindowFlags_None);
 
-				++rowIndex;
+				if (ImGui::BeginTable("##backup_list_table", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_ScrollY))
+				{
+					ImGui::TableSetupColumn("Timestamp", ImGuiTableColumnFlags_WidthFixed, 190.0f);
+					ImGui::TableSetupColumn("Backup path", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+					ImGui::TableHeadersRow();
+
+					for (int backupIndex = 0; backupIndex < (int)backupPaths.size(); ++backupIndex)
+					{
+						const std::wstring& backupPath = backupPaths[backupIndex];
+
+						ImGui::PushID(backupIndex);
+
+						ImGui::TableNextRow();
+
+						// Make the row selectable without blocking clicks on the link:
+						// We handle selection by detecting click on empty space in the row.
+						float rowMinY = ImGui::GetCursorScreenPos().y;
+
+						ImGui::TableSetColumnIndex(0);
+						std::wstring stamp = BackupTimestampFromBackupPath(backupPath);
+						ImGui::TextUnformatted(WToUTF8(stamp).c_str());
+
+						ImGui::TableSetColumnIndex(1);
+
+						std::string backupPathUtf8 = WToUTF8(backupPath);
+						ImGui::TextClickable("%s", backupPathUtf8.c_str());
+
+						if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+						{
+							selectedOriginalPath = originalPath;
+							selectedBackupPath = backupPath;
+							OpenFileWithShell(backupPath);
+						}
+
+						if (ImGui::BeginPopupContextItem("backup_context"))
+						{
+							if (ImGui::MenuItem("Open in Explorer"))
+							{
+								selectedOriginalPath = originalPath;
+								selectedBackupPath = backupPath;
+								OpenExplorerSelectPath(backupPath);
+							}
+							ImGui::EndPopup();
+						}
+
+						float rowMaxY = ImGui::GetCursorScreenPos().y;
+
+						// Selection hit-test for the whole row (but doesn't steal link clicks)
+						ImGuiWindow* window = ImGui::GetCurrentWindow();
+						if (window)
+						{
+							ImVec2 windowPos = window->Pos;
+							ImVec2 contentMin = ImGui::GetWindowContentRegionMin();
+							ImVec2 contentMax = ImGui::GetWindowContentRegionMax();
+
+							ImVec2 rowMin(windowPos.x + contentMin.x, rowMinY);
+							ImVec2 rowMax(windowPos.x + contentMax.x, rowMaxY);
+
+							bool isHovered = ImGui::IsMouseHoveringRect(rowMin, rowMax, false);
+							bool isSelected = (!selectedBackupPath.empty() && selectedBackupPath == backupPath);
+
+							if (isHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+							{
+								selectedOriginalPath = originalPath;
+								selectedBackupPath = backupPath;
+								isSelected = true;
+							}
+
+							if (isSelected)
+							{
+								ImU32 bgColor = ImGui::GetColorU32(ImGuiCol_Header);
+								ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, bgColor);
+							}
+							else if (isHovered)
+							{
+								ImU32 hoverColor = ImGui::GetColorU32(ImGuiCol_HeaderHovered);
+								ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, hoverColor);
+							}
+						}
+
+						ImGui::PopID();
+					}
+
+					ImGui::EndTable();
+				}
+
+				ImGui::EndChild();
 			}
+
+			ImGui::PopID();
 		}
 
 		ImGui::EndTable();
 	}
 
-	if (isDiffPressed && hasSelection)
+	// Ctrl+D diff selected backup against current original
+	if (isDiffPressed)
 	{
-		LaunchDiffTool(g_settings.diffToolPath, selectedBackupPath, selectedOriginalPath);
+		if (!selectedOriginalPath.empty() && !selectedBackupPath.empty())
+		{
+			LaunchDiffTool(g_settings.diffToolPath, selectedBackupPath, selectedOriginalPath);
+		}
+	}
+
+	if (ImGui::IsKeyPressed(ImGuiKey_F5, false))
+	{
+		ScanBackupFolder();
 	}
 }
+
 
 static void UI_History()
 {

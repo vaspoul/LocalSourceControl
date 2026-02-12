@@ -9,8 +9,8 @@ struct Settings
 	int				winH = 720;
 
 	std::wstring	backupRoot = L"";
-	uint32_t		maxBackupSizeMB = 10240;
-	uint32_t		maxBackupsPerFile = 50;
+	uint32_t		maxBackupSizeMB = 1024*10;
+	uint32_t		maxBackupsPerFile = 256;
 	std::wstring	diffToolPath;
 	bool			minimizeOnClose = true;
 
