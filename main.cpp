@@ -846,9 +846,11 @@ void LaunchDiffTool(const std::wstring& diffToolPath, const std::wstring& backup
 
 static void UI_WatchedFolders()
 {
-	static int selectedFolderIndex = -1;
+	ImGui::Dummy(ImVec2(0,4));
+	ImGui::Separator();
+	ImGui::Dummy(ImVec2(0,4));
 
-	ImGui::TextUnformatted("Watched folders");
+	static int selectedFolderIndex = -1;
 
 	if (g_settings.watched.empty())
 	{
@@ -1036,9 +1038,9 @@ static void UI_WatchedFolders()
 					ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch, 1.0f);
 
 					ImGui::TableNextRow();
-					ImGui::TableSetColumnIndex(0);
+					ImGui::TableNextColumn();
 					ImGui::TextUnformatted("Path");
-					ImGui::TableSetColumnIndex(1);
+					ImGui::TableNextColumn();
 					std::string watchedPathUtf8 = WToUTF8(watchedFolder.path);
 					ImGui::TextClickable("%s", watchedPathUtf8.c_str());
 					if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
@@ -1047,7 +1049,7 @@ static void UI_WatchedFolders()
 					}
 					if (ImGui::BeginPopupContextItem("watched_path_context"))
 					{
-						if (ImGui::MenuItem("Open in Explorer"))
+						if (ImGui::MenuItem("Show in Explorer"))
 						{
 							OpenExplorerSelectPath(watchedFolder.path);
 						}
@@ -1069,22 +1071,22 @@ static void UI_WatchedFolders()
 					}
 
 					ImGui::TableNextRow();
-					ImGui::TableSetColumnIndex(0);
+					ImGui::TableNextColumn();
 					ImGui::TextUnformatted("Include sub-folders");
-					ImGui::TableSetColumnIndex(1);
+					ImGui::TableNextColumn();
 					if (ImGui::Checkbox("##include_subfolders", &watchedFolder.includeSubfolders))
 					{
 						MarkSettingsDirty();
 					}
 
 					ImGui::TableNextRow();
-					ImGui::TableSetColumnIndex(0);
+					ImGui::TableNextColumn();
 					ImGui::TextUnformatted("Include filters");
 
 					ImGui::SameLine();
 					ImGui::HelpTooltip("Examples: .png, png, *.tmp, foo*, *bar*");
 
-					ImGui::TableSetColumnIndex(1);
+					ImGui::TableNextColumn();
 					{
 						ImGui::SetNextItemWidth(-1.0f);
 						if (ImGui::InputTextStdString("##include_filters", watchedFolder.includeFiltersCSV))
@@ -1094,13 +1096,13 @@ static void UI_WatchedFolders()
 					}
 
 					ImGui::TableNextRow();
-					ImGui::TableSetColumnIndex(0);
+					ImGui::TableNextColumn();
 					ImGui::TextUnformatted("Exclude filters");
 
 					ImGui::SameLine();
 					ImGui::HelpTooltip("Examples: .tmp, *autosave*, \\\\.*");
 
-					ImGui::TableSetColumnIndex(1);
+					ImGui::TableNextColumn();
 					{
 						ImGui::SetNextItemWidth(-1.0f);
 						if (ImGui::InputTextStdString("##exclude_filters", watchedFolder.excludeFiltersCSV))
@@ -1110,9 +1112,9 @@ static void UI_WatchedFolders()
 					}
 
 					ImGui::TableNextRow();
-					ImGui::TableSetColumnIndex(0);
+					ImGui::TableNextColumn();
 					ImGui::TextUnformatted("Actions");
-					ImGui::TableSetColumnIndex(1);
+					ImGui::TableNextColumn();
 					if (ImGui::Button("Apply All"))
 					{
 						MarkSettingsDirty();
@@ -1266,6 +1268,10 @@ static std::wstring BackupTimestampFromBackupPath(const std::wstring& backupPath
 
 static void UI_BackedUpFiles()
 {
+	ImGui::Dummy(ImVec2(0,4));
+	ImGui::Separator();
+	ImGui::Dummy(ImVec2(0,4));
+
 	static std::wstring searchText;
 
 	static std::wstring selectedOriginalPath;
@@ -1275,20 +1281,22 @@ static void UI_BackedUpFiles()
 	ImGui::SameLine();
 	ImGui::InputTextStdString("##search", searchText);
 	ImGui::SameLine();
-	if (ImGui::Button("Clear"))
+	if (ImGui::Button("Clear", ImVec2(80, 0)))
 	{
 		searchText.clear();
 	}
 
-	ImGui::Separator();
+	ImGui::Dummy(ImVec2(0,4));
 
 	bool isCtrlDown = ImGui::GetIO().KeyCtrl;
 	bool isDiffPressed = isCtrlDown && ImGui::IsKeyPressed(ImGuiKey_D, false);
 
-	if (ImGui::BeginTable("backed_up_files", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY))
+	ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(6.0f, 6.0f));
+
+	if (ImGui::BeginTable("backed_up_files", 3, ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY))
 	{
-		ImGui::TableSetupColumn("Path",   ImGuiTableColumnFlags_WidthStretch, 1.5f);
-		ImGui::TableSetupColumn("Filename", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+		ImGui::TableSetupColumn("Path",   ImGuiTableColumnFlags_WidthStretch, 1.0f);
+		ImGui::TableSetupColumn("Filename", ImGuiTableColumnFlags_WidthStretch, 0.5f);
 		ImGui::TableSetupColumn("Backups",  ImGuiTableColumnFlags_WidthStretch, 2.0f);
 		ImGui::TableHeadersRow();
 
@@ -1340,7 +1348,7 @@ static void UI_BackedUpFiles()
 
 			if (ImGui::BeginPopupContextItem("folder_context"))
 			{
-				if (ImGui::MenuItem("Open in Explorer"))
+				if (ImGui::MenuItem("Show in Explorer"))
 				{
 					OpenExplorerSelectPath(originalFolderWide);
 				}
@@ -1368,7 +1376,7 @@ static void UI_BackedUpFiles()
 
 			if (ImGui::BeginPopupContextItem("original_context"))
 			{
-				if (ImGui::MenuItem("Open in Explorer"))
+				if (ImGui::MenuItem("Show in Explorer"))
 				{
 					selectedOriginalPath = originalPath;
 					selectedBackupPath.clear();
@@ -1386,11 +1394,11 @@ static void UI_BackedUpFiles()
 			ImGuiID expandId = ImGui::GetID("expanded_state");
 			bool isExpanded = storage->GetBool(expandId, false);
 
-			ImGui::Text("%d", (int)backupPaths.size());
+			ImGui::Text("%3d", (int)backupPaths.size());
 			ImGui::SameLine();
 
 			const char* expandLabel = isExpanded ? "Collapse" : "Expand";
-			if (ImGui::SmallButton(expandLabel))
+			if (ImGui::Button(expandLabel))
 			{
 				isExpanded = !isExpanded;
 				storage->SetBool(expandId, isExpanded);
@@ -1398,7 +1406,7 @@ static void UI_BackedUpFiles()
 
 			ImGui::SameLine();
 
-			if (ImGui::SmallButton("Show Latest"))
+			if (ImGui::Button("Show Latest"))
 			{
 				const std::wstring& latestBackupPath = backupPaths.back();
 				OpenExplorerSelectPath(latestBackupPath);
@@ -1406,7 +1414,7 @@ static void UI_BackedUpFiles()
 
 			ImGui::SameLine();
 
-			if (ImGui::SmallButton("Diff Latest"))
+			if (ImGui::Button("Diff Latest"))
 			{
 				const std::wstring& latestBackupPath = backupPaths.back();
 				LaunchDiffTool(g_settings.diffToolPath, latestBackupPath, selectedOriginalPath);
@@ -1432,7 +1440,7 @@ static void UI_BackedUpFiles()
 				if (ImGui::BeginTable("##backup_list_table", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_ScrollY))
 				{
 					ImGui::TableSetupColumn("Date & Time", ImGuiTableColumnFlags_WidthFixed, 190.0f);
-					ImGui::TableSetupColumn("Backup Path", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+					ImGui::TableSetupColumn("Backup File", ImGuiTableColumnFlags_WidthStretch, 1.0f);
 					ImGui::TableHeadersRow();
 
 					for (int backupIndex = (int)backupPaths.size() - 1; backupIndex >= 0 ; --backupIndex)
@@ -1447,14 +1455,19 @@ static void UI_BackedUpFiles()
 						// We handle selection by detecting click on empty space in the row.
 						float rowMinY = ImGui::GetCursorScreenPos().y;
 
-						ImGui::TableSetColumnIndex(0);
+						ImGui::TableNextColumn();
 						std::wstring stamp = BackupTimestampFromBackupPath(backupPath);
 						ImGui::TextUnformatted(WToUTF8(stamp).c_str());
 
-						ImGui::TableSetColumnIndex(1);
+						ImGui::TableNextColumn();
 
-						std::string backupPathUtf8 = WToUTF8(backupPath);
-						ImGui::TextClickable("%s", backupPathUtf8.c_str());
+						std::wstring backupFileName = std::fs::path(backupPath).filename().wstring();
+						std::string backupFileNameUtf8 = WToUTF8(backupFileName);
+						ImGui::TextClickable("%s", backupFileNameUtf8.c_str());
+						if (ImGui::IsItemHovered())
+						{
+							ImGui::SetTooltip("%s", WToUTF8(backupPath).c_str());
+						}
 
 						if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 						{
@@ -1465,7 +1478,21 @@ static void UI_BackedUpFiles()
 
 						if (ImGui::BeginPopupContextItem("backup_context"))
 						{
-							if (ImGui::MenuItem("Open in Explorer"))
+							if (ImGui::MenuItem("Open"))
+							{
+								selectedOriginalPath = originalPath;
+								selectedBackupPath = backupPath;
+								OpenFileWithShell(backupPath);
+							}
+
+							if (ImGui::MenuItem("Diff"))
+							{
+								selectedOriginalPath = originalPath;
+								selectedBackupPath = backupPath;
+								LaunchDiffTool(g_settings.diffToolPath, selectedBackupPath, selectedOriginalPath);
+							}
+
+							if (ImGui::MenuItem("Show in Explorer"))
 							{
 								selectedOriginalPath = originalPath;
 								selectedBackupPath = backupPath;
@@ -1524,6 +1551,8 @@ static void UI_BackedUpFiles()
 		ImGui::EndTable();
 	}
 
+	ImGui::PopStyleVar();
+
 	// Ctrl+D diff selected backup against current original
 	if (isDiffPressed)
 	{
@@ -1542,6 +1571,10 @@ static void UI_BackedUpFiles()
 
 static void UI_History()
 {
+	ImGui::Dummy(ImVec2(0,4));
+	ImGui::Separator();
+	ImGui::Dummy(ImVec2(0,4));
+
 	static int selectedOperationIndex = -1;
 
 	ImGui::Text("Last %d operations", kOperationHistoryMaxCount);
@@ -1579,11 +1612,11 @@ static void UI_History()
 
 			float rowMinY = ImGui::GetCursorScreenPos().y;
 
-			ImGui::TableSetColumnIndex(0);
+			ImGui::TableNextColumn();
 			std::wstring formattedTimeStamp = FormatOperationTimestampForDisplay(backupOperation.timeStamp);
 			ImGui::TextUnformatted(WToUTF8(formattedTimeStamp).c_str());
 
-			ImGui::TableSetColumnIndex(1);
+			ImGui::TableNextColumn();
 			{
 				std::string originalUtf8 = WToUTF8(backupOperation.originalPath);
 
@@ -1600,7 +1633,7 @@ static void UI_History()
 
 				if (ImGui::BeginPopupContextItem("original_context"))
 				{
-					if (ImGui::MenuItem("Open in Explorer"))
+					if (ImGui::MenuItem("Show in Explorer"))
 					{
 						selectedOperationIndex = operationIndex;
 						OpenExplorerSelectPath(backupOperation.originalPath);
@@ -1609,7 +1642,7 @@ static void UI_History()
 				}
 			}
 
-			ImGui::TableSetColumnIndex(2);
+			ImGui::TableNextColumn();
 			{
 				std::string backupUtf8 = WToUTF8(backupOperation.backupPath);
 
@@ -1626,7 +1659,7 @@ static void UI_History()
 
 				if (ImGui::BeginPopupContextItem("backup_context"))
 				{
-					if (ImGui::MenuItem("Open in Explorer"))
+					if (ImGui::MenuItem("Show in Explorer"))
 					{
 						selectedOperationIndex = operationIndex;
 						OpenExplorerSelectPath(backupOperation.backupPath);
@@ -1635,7 +1668,7 @@ static void UI_History()
 				}
 			}
 
-			ImGui::TableSetColumnIndex(3);
+			ImGui::TableNextColumn();
 			ImGui::TextUnformatted(WToUTF8(backupOperation.result).c_str());
 
 			float rowMaxY = ImGui::GetCursorScreenPos().y;
@@ -1662,7 +1695,12 @@ static void UI_History()
 
 static void UI_Settings()
 {
+	ImGui::Dummy(ImVec2(0,4));
+	ImGui::Separator();
+	ImGui::Dummy(ImVec2(0,4));
+
 	static std::string backupRootUtf8;
+	static std::string diffToolUtf8;
 
 	if (backupRootUtf8.empty())
 	{
@@ -1673,101 +1711,8 @@ static void UI_Settings()
 		}
 	}
 
-	ImGui::TextUnformatted("Backup folder");
-
-	if (ImGui::Button("Select Backup Folder"))
-	{
-		std::wstring selectedPath = BrowseForFolder(L"Select backup folder");
-
-		if (!selectedPath.empty())
-		{
-			g_settings.backupRoot = selectedPath;
-
-			// Requirement: button updates the local root variable
-			backupRootUtf8 = WToUTF8(g_settings.backupRoot);
-
-			MarkSettingsDirty();
-			SaveSettings();
-			ScanBackupFolder();
-		}
-	}
-
-	ImGui::HelpTooltip("Backups are nested by original path under this root.");
-
-	ImGui::SameLine();
-
-	if (ImGui::Button("Open Backup Folder"))
-	{
-		if (!g_settings.backupRoot.empty())
-		{
-			(void)ShellExecuteW(nullptr, L"open", g_settings.backupRoot.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-		}
-	}
-
-	ImGui::HelpTooltip("Opens the backup root folder in Explorer.");
-
-
-	ImGui::SetNextItemWidth(-1.0f);
-	if (ImGui::InputTextStdString("##backupRoot", backupRootUtf8))
-	{
-		g_settings.backupRoot = UTF8ToW(backupRootUtf8);
-		MarkSettingsDirty();
-	}
-
-	ImGui::Separator();
-
 	int maxFolderSizeMB = (int)g_settings.maxBackupSizeMB;
-	ImGui::TextUnformatted("Max backup folder size (MB)");
-	ImGui::HelpTooltip("When exceeded, oldest backups across all files are deleted until within the limit.");
-	ImGui::SetNextItemWidth(240.0f);
-
-	if (ImGui::InputInt("##maxsize", &maxFolderSizeMB))
-	{
-		if (maxFolderSizeMB < 1)
-		{
-			maxFolderSizeMB = 1;
-		}
-
-		g_settings.maxBackupSizeMB = (uint32_t)maxFolderSizeMB;
-		MarkSettingsDirty();
-	}
-
 	int maxPerFileBackups = (int)g_settings.maxBackupsPerFile;
-	ImGui::TextUnformatted("Max backups per file");
-	ImGui::HelpTooltip("Per original file, keep at most this many backups. Oldest backups are deleted first.");
-	ImGui::SetNextItemWidth(240.0f);
-
-	if (ImGui::InputInt("##maxperfile", &maxPerFileBackups))
-	{
-		if (maxPerFileBackups < 1)
-		{
-			maxPerFileBackups = 1;
-		}
-
-		g_settings.maxBackupsPerFile = (uint32_t)maxPerFileBackups;
-		MarkSettingsDirty();
-	}
-
-	ImGui::Separator();
-
-	if (ImGui::Button("Apply"))
-	{
-		MarkSettingsDirty();
-		SaveSettings();
-		ScanBackupFolder();
-		EnforceGlobalSizeLimit(std::fs::path(g_settings.backupRoot), g_settings.maxBackupSizeMB);
-	}
-
-	ImGui::SameLine();
-
-	if (ImGui::Button("Rescan Backup Folder"))
-	{
-		ScanBackupFolder();
-	}
-
-	ImGui::Separator();
-
-	static std::string diffToolUtf8;
 	if (diffToolUtf8.empty())
 	{
 		diffToolUtf8 = WToUTF8(g_settings.diffToolPath);
@@ -1777,44 +1722,141 @@ static void UI_Settings()
 		}
 	}
 
-	ImGui::TextUnformatted("Diff tool executable");
-	ImGui::HelpTooltip(
-		"Used by Ctrl+D in Backup History.\n"
-		"The tool is launched as:\n"
-		"  <diffTool.exe> \"<backup>\" \"<original>\"\n"
-		"Pick a diff tool that accepts two file arguments.");
-
-	if (ImGui::Button("Browse Diff Tool"))
+	if (ImGui::BeginTable("settings_grid", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingFixedFit))
 	{
-		std::wstring selectedExePath = BrowseForExeFile();
-		if (!selectedExePath.empty())
-		{
-			g_settings.diffToolPath = selectedExePath;
-			diffToolUtf8 = WToUTF8(g_settings.diffToolPath);
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn();
+		ImGui::TextUnformatted("Backup folder");
 
+		ImGui::SameLine();
+
+		ImGui::TableNextColumn();
+
+		ImGui::SetNextItemWidth(400);
+
+		if (ImGui::InputTextStdString("##backupRoot", backupRootUtf8))
+		{
+			g_settings.backupRoot = UTF8ToW(backupRootUtf8);
+			MarkSettingsDirty();
+		}
+
+		ImGui::SameLine();
+
+		if (ImGui::Button("..."))
+		{
+			std::wstring selectedPath = BrowseForFolder(L"Select backup folder");
+			if (!selectedPath.empty())
+			{
+				g_settings.backupRoot = selectedPath;
+				backupRootUtf8 = WToUTF8(g_settings.backupRoot);
+				MarkSettingsDirty();
+				SaveSettings();
+				ScanBackupFolder();
+			}
+		}
+
+		ImGui::SameLine();
+
+		if (ImGui::Button("Explore"))
+		{
+			if (!g_settings.backupRoot.empty())
+			{
+				(void)ShellExecuteW(nullptr, L"open", g_settings.backupRoot.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+			}
+		}
+
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn();
+		
+		ImGui::TextUnformatted("Max backup folder size (MB)");
+		
+		ImGui::SameLine();
+
+		ImGui::HelpTooltip("When exceeded, oldest backups across all files are deleted until within the limit.");
+		
+		ImGui::TableNextColumn();
+		
+		ImGui::SetNextItemWidth(240.0f);
+		
+		if (ImGui::InputInt("##maxsize", &maxFolderSizeMB))
+		{
+			if (maxFolderSizeMB < 1)
+			{
+				maxFolderSizeMB = 1;
+			}
+			g_settings.maxBackupSizeMB = (uint32_t)maxFolderSizeMB;
+			MarkSettingsDirty();
+		}
+
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn();
+		ImGui::TextUnformatted("Max backups per file");
+		ImGui::SameLine();
+		ImGui::HelpTooltip("Per original file, keep at most this many backups. Oldest backups are deleted first.");
+		ImGui::TableNextColumn();
+		ImGui::SetNextItemWidth(240.0f);
+		if (ImGui::InputInt("##maxperfile", &maxPerFileBackups))
+		{
+			if (maxPerFileBackups < 1)
+			{
+				maxPerFileBackups = 1;
+			}
+			g_settings.maxBackupsPerFile = (uint32_t)maxPerFileBackups;
+			MarkSettingsDirty();
+		}
+
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn();
+		ImGui::TextUnformatted("Diff tool executable");
+		ImGui::SameLine();
+		ImGui::HelpTooltip( "Used by Ctrl+D in Backup History.\n"
+							"The tool is launched as:\n"
+							"  <diffTool.exe> \"<backup>\" \"<original>\"\n"
+							"Pick a diff tool that accepts two file arguments.");
+
+		ImGui::TableNextColumn();
+
+		ImGui::SetNextItemWidth(400);
+		if (ImGui::InputTextStdString("##diffTool", diffToolUtf8))
+		{
+			g_settings.diffToolPath = UTF8ToW(diffToolUtf8);
+			MarkSettingsDirty();
+		}
+
+		ImGui::SameLine();
+
+		if (ImGui::Button("Browse Diff Tool"))
+		{
+			std::wstring selectedExePath = BrowseForExeFile();
+			if (!selectedExePath.empty())
+			{
+				g_settings.diffToolPath = selectedExePath;
+				diffToolUtf8 = WToUTF8(g_settings.diffToolPath);
+				MarkSettingsDirty();
+				SaveSettings();
+			}
+		}
+
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn();
+		ImGui::TextUnformatted("Minimize to tray on close");
+		ImGui::TableNextColumn();
+		if (ImGui::Checkbox("##minimizeOnClose", &g_settings.minimizeOnClose))
+		{
+			MarkSettingsDirty();
+		}
+
+		ImGui::EndTable();
+
+
+		if (ImGui::Button("Apply"))
+		{
 			MarkSettingsDirty();
 			SaveSettings();
+			ScanBackupFolder();
+			EnforceGlobalSizeLimit(std::fs::path(g_settings.backupRoot), g_settings.maxBackupSizeMB);
 		}
 	}
-
-	ImGui::SameLine();
-	ImGui::SetNextItemWidth(-1.0f);
-
-	if (ImGui::InputTextStdString("##diffTool", diffToolUtf8))
-	{
-		g_settings.diffToolPath = UTF8ToW(diffToolUtf8);
-		MarkSettingsDirty();
-	}
-
-	ImGui::Separator();
-
-	if (ImGui::Checkbox("Minimize to tray when closing window", &g_settings.minimizeOnClose))
-	{
-		MarkSettingsDirty();
-	}
-
-	ImGui::HelpTooltip("When enabled, clicking the window close button (X) hides the app to the system tray instead of exiting.");
-
 }
 
 void AppInit()
@@ -1834,22 +1876,22 @@ bool AppDraw()
 {
 	if (ImGui::BeginTabBar("tabs"))
 	{
-		if (ImGui::BeginTabItem("Watched Folders"))
+		if (ImGui::BeginTabItem(" Watched Folders "))
 		{
 			UI_WatchedFolders();
 			ImGui::EndTabItem();
 		}
-		if (ImGui::BeginTabItem("Backed Up Files"))
+		if (ImGui::BeginTabItem(" Backed Up Files "))
 		{
 			UI_BackedUpFiles();
 			ImGui::EndTabItem();
 		}
-		if (ImGui::BeginTabItem("Backup History"))
+		if (ImGui::BeginTabItem("       Log       "))
 		{
 			UI_History();
 			ImGui::EndTabItem();
 		}
-		if (ImGui::BeginTabItem("Settings"))
+		if (ImGui::BeginTabItem("    Settings     "))
 		{
 			UI_Settings();
 			ImGui::EndTabItem();
