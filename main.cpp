@@ -846,6 +846,8 @@ void LaunchDiffTool(const std::wstring& diffToolPath, const std::wstring& backup
 
 static void UI_WatchedFolders()
 {
+	static int selectedFolderIndex = -1;
+
 	ImGui::TextUnformatted("Watched folders");
 	ImGui::HelpTooltip(
 		"Tokens are comma-separated.\n"
@@ -857,105 +859,190 @@ static void UI_WatchedFolders()
 		"Exclude wins over include. If include list is empty, everything is included (subject to exclude)."
 	);
 
-	if (ImGui::Button("Add Folder"))
+	if (g_settings.watched.empty())
 	{
-		std::wstring selectedPath = BrowseForFolder(L"Select folder to watch");
-		if (!selectedPath.empty())
-		{
-			WatchedFolder newWatchedFolder = {};
-			newWatchedFolder.path = selectedPath;
-			newWatchedFolder.includeSubfolders = true;
-
-			g_settings.watched.push_back(newWatchedFolder);
-			MarkSettingsDirty();
-			SaveSettings();
-			StartWatchersFromSettings();
-		}
+		selectedFolderIndex = -1;
+	}
+	else if (selectedFolderIndex < 0 || selectedFolderIndex >= (int)g_settings.watched.size())
+	{
+		selectedFolderIndex = 0;
 	}
 
-	ImGui::SameLine();
+	bool removeSelectedFolder = false;
 
-	if (ImGui::Button("Apply All"))
+	if (ImGui::BeginTable("watched_folders_split", 2, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingStretchProp))
 	{
-		MarkSettingsDirty();
-		SaveSettings();
-		StartWatchersFromSettings();
-	}
+		ImGui::TableSetupColumn("Folders", ImGuiTableColumnFlags_WidthFixed, 320.0f);
+		ImGui::TableSetupColumn("Properties", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+		ImGui::TableNextRow();
 
-	ImGui::Separator();
-
-	for (int folderIndex = 0; folderIndex < (int)g_settings.watched.size(); ++folderIndex)
-	{
-		WatchedFolder& watchedFolder = g_settings.watched[folderIndex];
-		ImGui::PushID(folderIndex);
-
-		bool isOpen = ImGui::CollapsingHeader(WToUTF8(watchedFolder.path).c_str(), ImGuiTreeNodeFlags_DefaultOpen);
-		if (isOpen)
+		ImGui::TableSetColumnIndex(0);
+		if (ImGui::BeginChild("watched_folders_list", ImVec2(0.0f, 0.0f), true))
 		{
-			if (ImGui::Checkbox("Include sub-folders", &watchedFolder.includeSubfolders))
+			for (int folderIndex = 0; folderIndex < (int)g_settings.watched.size(); ++folderIndex)
 			{
-				MarkSettingsDirty();
+				const std::wstring& watchedPath = g_settings.watched[folderIndex].path;
+				std::string watchedPathUtf8 = WToUTF8(watchedPath);
+
+				bool isSelected = (folderIndex == selectedFolderIndex);
+				if (ImGui::Selectable(watchedPathUtf8.c_str(), isSelected))
+				{
+					selectedFolderIndex = folderIndex;
+				}
+
+				if (ImGui::IsItemHovered())
+				{
+					ImGui::SetTooltip("%s", watchedPathUtf8.c_str());
+				}
 			}
 
-			std::string includeText = WToUTF8(watchedFolder.includeFiltersCSV);
-			if (includeText.capacity() < 512)
-			{
-				includeText.reserve(512);
-			}
-
-			ImGui::TextUnformatted("Include filters (CSV)");
-			ImGui::HelpTooltip("Examples:\n  .png, .jpg\n  png, jpg\n  *.tmp\n  foo*, *bar*\n  report\nIf empty: include everything (unless excluded).");
-			ImGui::SetNextItemWidth(-1.0f);
-
-			if (ImGui::InputTextStdString("##include", includeText))
-			{
-				watchedFolder.includeFiltersCSV = UTF8ToW(includeText);
-				MarkSettingsDirty();
-			}
-
-			std::string excludeText = WToUTF8(watchedFolder.excludeFiltersCSV);
-			if (excludeText.capacity() < 512)
-			{
-				excludeText.reserve(512);
-			}
-
-			ImGui::TextUnformatted("Exclude filters (CSV)");
-			ImGui::HelpTooltip("Examples:\n  .tmp, .bak\n  *autosave*\n  \\\\.*\nExclude is checked first and always wins.");
-			ImGui::SetNextItemWidth(-1.0f);
-
-			if (ImGui::InputTextStdString("##exclude", excludeText))
-			{
-				watchedFolder.excludeFiltersCSV = UTF8ToW(excludeText);
-				MarkSettingsDirty();
-			}
-
-			if (ImGui::Button("Change Path"))
+			if (ImGui::Button("Add Folder", ImVec2(-1.0f, 0.0f)))
 			{
 				std::wstring selectedPath = BrowseForFolder(L"Select folder to watch");
 				if (!selectedPath.empty())
 				{
-					watchedFolder.path = selectedPath;
+					WatchedFolder newWatchedFolder = {};
+					newWatchedFolder.path = selectedPath;
+					newWatchedFolder.includeSubfolders = true;
+
+					g_settings.watched.push_back(newWatchedFolder);
+					selectedFolderIndex = (int)g_settings.watched.size() - 1;
+
 					MarkSettingsDirty();
 					SaveSettings();
 					StartWatchersFromSettings();
 				}
 			}
+		}
+		ImGui::EndChild();
 
-			ImGui::SameLine();
+		ImGui::TableSetColumnIndex(1);
 
-			if (ImGui::Button("Remove"))
+		if (selectedFolderIndex < 0 || selectedFolderIndex >= (int)g_settings.watched.size())
+		{
+			ImGui::TextDisabled("No watched folder selected.");
+		}
+		else
+		{
+			WatchedFolder& watchedFolder = g_settings.watched[selectedFolderIndex];
+
+			if (ImGui::BeginTable("watched_folder_props_grid", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingFixedFit))
 			{
-				g_settings.watched.erase(g_settings.watched.begin() + folderIndex);
-				MarkSettingsDirty();
-				SaveSettings();
-				StartWatchersFromSettings();
+				ImGui::TableSetupColumn("Property", ImGuiTableColumnFlags_WidthFixed, 170.0f);
+				ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch, 1.0f);
 
-				ImGui::PopID();
-				break;
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::TextUnformatted("Path");
+				ImGui::TableSetColumnIndex(1);
+				std::string watchedPathUtf8 = WToUTF8(watchedFolder.path);
+				ImGui::TextClickable("%s", watchedPathUtf8.c_str());
+				if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+				{
+					OpenExplorerSelectPath(watchedFolder.path);
+				}
+				if (ImGui::BeginPopupContextItem("watched_path_context"))
+				{
+					if (ImGui::MenuItem("Open in Explorer"))
+					{
+						OpenExplorerSelectPath(watchedFolder.path);
+					}
+					ImGui::EndPopup();
+				}
+
+				ImGui::SameLine();
+
+				if (ImGui::Button("..."))
+				{
+					std::wstring selectedPath = BrowseForFolder(L"Select folder to watch");
+					if (!selectedPath.empty())
+					{
+						watchedFolder.path = selectedPath;
+						MarkSettingsDirty();
+						SaveSettings();
+						StartWatchersFromSettings();
+					}
+				}
+
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::TextUnformatted("Include sub-folders");
+				ImGui::TableSetColumnIndex(1);
+				if (ImGui::Checkbox("##include_subfolders", &watchedFolder.includeSubfolders))
+				{
+					MarkSettingsDirty();
+				}
+
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::TextUnformatted("Include filters");
+
+				ImGui::SameLine();
+				ImGui::HelpTooltip("Examples: .png, png, *.tmp, foo*, *bar*");
+
+				ImGui::TableSetColumnIndex(1);
+				{
+					ImGui::SetNextItemWidth(-1.0f);
+					if (ImGui::InputTextStdString("##include_filters", watchedFolder.includeFiltersCSV))
+					{
+						MarkSettingsDirty();
+					}
+				}
+
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::TextUnformatted("Exclude filters");
+
+				ImGui::SameLine();
+				ImGui::HelpTooltip("Examples: .tmp, *autosave*, \\\\.*");
+
+				ImGui::TableSetColumnIndex(1);
+				{
+					ImGui::SetNextItemWidth(-1.0f);
+					if (ImGui::InputTextStdString("##exclude_filters", watchedFolder.excludeFiltersCSV))
+					{
+						MarkSettingsDirty();
+					}
+				}
+
+				ImGui::TableNextRow();
+				ImGui::TableSetColumnIndex(0);
+				ImGui::TextUnformatted("Actions");
+				ImGui::TableSetColumnIndex(1);
+				if (ImGui::Button("Apply All"))
+				{
+					MarkSettingsDirty();
+					SaveSettings();
+					StartWatchersFromSettings();
+				}
+				ImGui::SameLine();
+				if (ImGui::Button("Remove Folder"))
+				{
+					removeSelectedFolder = true;
+				}
+
+				ImGui::EndTable();
 			}
 		}
 
-		ImGui::PopID();
+		ImGui::EndTable();
+	}
+
+	if (removeSelectedFolder && selectedFolderIndex >= 0 && selectedFolderIndex < (int)g_settings.watched.size())
+	{
+		g_settings.watched.erase(g_settings.watched.begin() + selectedFolderIndex);
+		MarkSettingsDirty();
+		SaveSettings();
+		StartWatchersFromSettings();
+
+		if (g_settings.watched.empty())
+		{
+			selectedFolderIndex = -1;
+		}
+		else if (selectedFolderIndex >= (int)g_settings.watched.size())
+		{
+			selectedFolderIndex = (int)g_settings.watched.size() - 1;
+		}
 	}
 }
 
