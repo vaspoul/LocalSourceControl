@@ -1512,10 +1512,11 @@ static void UI_BackedUpFiles()
 				const std::vector<std::wstring>& selectedBackups = selectedIt->second;
 				latestBackupPath = selectedBackups.back();
 
-				if (ImGui::BeginTable("selected_file_backups_table", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY))
+				if (ImGui::BeginTable("selected_file_backups_table", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY))
 				{
 					ImGui::TableSetupColumn("Date & Time", ImGuiTableColumnFlags_WidthFixed, 190.0f);
 					ImGui::TableSetupColumn("Backup File", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+					ImGui::TableSetupColumn("##Actions", ImGuiTableColumnFlags_WidthFixed, 250.0f);
 					ImGui::TableHeadersRow();
 
 					for (int backupIndex = (int)selectedBackups.size() - 1; backupIndex >= 0; --backupIndex)
@@ -1553,6 +1554,30 @@ static void UI_BackedUpFiles()
 							if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 							{
 								OpenFileWithShell(backupPath);
+							}
+						}
+
+						ImGui::TableNextColumn();
+						{
+							bool hasPreviousBackup = (backupIndex > 0);
+							if (!hasPreviousBackup)
+							{
+								ImGui::BeginDisabled();
+							}
+							if (ImGui::Button("Diff Previous"))
+							{
+								const std::wstring& previousBackupPath = selectedBackups[backupIndex - 1];
+								LaunchDiffTool(g_settings.diffToolPath, previousBackupPath, backupPath);
+							}
+							if (!hasPreviousBackup)
+							{
+								ImGui::EndDisabled();
+							}
+
+							ImGui::SameLine();
+							if (ImGui::Button("Diff Current"))
+							{
+								LaunchDiffTool(g_settings.diffToolPath, backupPath, selectedOriginalPath);
 							}
 						}
 
@@ -1602,10 +1627,21 @@ static void UI_BackedUpFiles()
 								{
 									OpenFileWithShell(backupPath);
 								}
-								if (ImGui::MenuItem("Diff"))
+
+								if (backupIndex > 0)
+								{
+									if (ImGui::MenuItem("Diff Previous"))
+									{
+										const std::wstring& previousBackupPath = selectedBackups[backupIndex - 1];
+										LaunchDiffTool(g_settings.diffToolPath, previousBackupPath, backupPath);
+									}
+								}
+
+								if (ImGui::MenuItem("Diff Current"))
 								{
 									LaunchDiffTool(g_settings.diffToolPath, backupPath, selectedOriginalPath);
 								}
+
 								if (ImGui::MenuItem("Show in Explorer"))
 								{
 									OpenExplorerSelectPath(backupPath);
