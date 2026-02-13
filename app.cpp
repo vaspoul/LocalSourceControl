@@ -257,6 +257,7 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
 	ImGui::StyleColorsDark();
 	{
 		ImGuiIO& io = ImGui::GetIO();
+		io.IniFilename = nullptr;
 
 		ImFont* loadedFont = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\consola.ttf", 13.0f);
 
