@@ -255,6 +255,20 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
 	IMGUI_CHECKVERSION();
 	ImGui::CreateContext();
 	ImGui::StyleColorsDark();
+	{
+		ImGuiIO& io = ImGui::GetIO();
+
+		ImFont* loadedFont = io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\consola.ttf", 13.0f);
+
+		if (loadedFont)
+		{
+			io.FontDefault = loadedFont;
+		}
+		else
+		{
+			io.FontDefault = io.Fonts->AddFontDefault();
+		}
+	}
 
 	ImGui_ImplWin32_Init(g_hWnd);
 	ImGui_ImplDX11_Init(g_pd3dDevice, g_pd3dDeviceContext);
@@ -327,16 +341,22 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
 
 static void UpdateWindowSettingsFromHWND(HWND hWnd)
 {
-	RECT wrc = {};
-	if (!GetWindowRect(hWnd, &wrc))
+	RECT windowRect = {};
+	if (!GetWindowRect(hWnd, &windowRect))
 	{
 		return;
 	}
 
-	int x = wrc.left;
-	int y = wrc.top;
-	int w = (wrc.right - wrc.left);
-	int h = (wrc.bottom - wrc.top);
+	RECT clientRect = {};
+	if (!GetClientRect(hWnd, &clientRect))
+	{
+		return;
+	}
+
+	int x = windowRect.left;
+	int y = windowRect.top;
+	int w = (clientRect.right - clientRect.left);
+	int h = (clientRect.bottom - clientRect.top);
 
 	bool changed =
 		(x != g_settings.winX) ||
