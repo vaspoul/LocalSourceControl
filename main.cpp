@@ -108,7 +108,10 @@ static bool ParseBackupTimestamp(const std::wstring& backupFileName, std::wstrin
 		return false;
 	}
 
-	month = std::max(0, std::min(12, month));
+	if (month < 1 || month > 12)
+	{
+		return false;
+	}
 
 	wchar_t dateBuffer[64] = {};
 	wchar_t timeBuffer[64] = {};
@@ -121,9 +124,9 @@ static bool ParseBackupTimestamp(const std::wstring& backupFileName, std::wstrin
 
 	swprintf_s(
 		dateBuffer,
-		L"%02d/%s/%04d",
+		L"%02d %s %04d",
 		day,
-		monthNames[month],
+		monthNames[month - 1],
 		year);
 
 	swprintf_s(
@@ -137,6 +140,45 @@ static bool ParseBackupTimestamp(const std::wstring& backupFileName, std::wstrin
 	outTime = timeBuffer;
 
 	return true;
+}
+
+static std::wstring FormatOperationTimestampForDisplay(const std::wstring& rawTimestamp)
+{
+	int year = 0, month = 0, day = 0;
+	int hour = 0, minute = 0, second = 0;
+
+	if (swscanf_s(
+		rawTimestamp.c_str(),
+		L"%4d_%2d_%2d__%2d_%2d_%2d",
+		&year, &month, &day,
+		&hour, &minute, &second) != 6)
+	{
+		return rawTimestamp;
+	}
+
+	if (month < 1 || month > 12)
+	{
+		return rawTimestamp;
+	}
+
+	static const wchar_t* monthNames[12] =
+	{
+		L"Jan", L"Feb", L"Mar", L"Apr", L"May", L"Jun",
+		L"Jul", L"Aug", L"Sep", L"Oct", L"Nov", L"Dec"
+	};
+
+	wchar_t buffer[64] = {};
+	swprintf_s(
+		buffer,
+		L"%02d %s %04d %02d:%02d:%02d",
+		day,
+		monthNames[month - 1],
+		year,
+		hour,
+		minute,
+		second);
+
+	return buffer;
 }
 
 static void PushOperation(const BackupOperation& backupOperation)
@@ -170,12 +212,58 @@ static std::optional<uint64_t> TryGetFileWriteTimeU64(const std::wstring& filePa
 	return FileTimeToU64(fileAttributeData.ftLastWriteTime);
 }
 
-static bool FilterMatchToken(const std::wstring& fileNameLower, const std::wstring& extWithDotLower, const std::wstring& tokenRaw)
+static std::wstring NormalizePathSlashes(std::wstring value)
 {
-	std::wstring token = ToLower(Trim(tokenRaw));
+	for (wchar_t& currentChar : value)
+	{
+		if (currentChar == L'/')
+		{
+			currentChar = L'\\';
+		}
+	}
+
+	return value;
+}
+
+static bool FilterMatchToken(
+	const std::wstring& fileNameLower,
+	const std::wstring& extWithDotLower,
+	const std::wstring& relativePathLowerWithLeadingSlash,
+	const std::wstring& fullPathLower,
+	const std::wstring& tokenRaw)
+{
+	std::wstring token = NormalizePathSlashes(ToLower(Trim(tokenRaw)));
 	if (token.empty())
 	{
 		return false;
+	}
+
+	bool hasWildcard = (token.find(L'*') != std::wstring::npos || token.find(L'?') != std::wstring::npos);
+	bool hasPathSeparator = (token.find(L'\\') != std::wstring::npos);
+
+	if (hasPathSeparator)
+	{
+		if (hasWildcard)
+		{
+			if (PathMatchSpecW(relativePathLowerWithLeadingSlash.c_str(), token.c_str()) != FALSE)
+			{
+				return true;
+			}
+
+			// Path tokens that start with '\' are often intended as "anywhere under the watched tree".
+			if (!token.empty() && token[0] == L'\\')
+			{
+				std::wstring anyDepthToken = L"*" + token;
+				if (PathMatchSpecW(relativePathLowerWithLeadingSlash.c_str(), anyDepthToken.c_str()) != FALSE)
+				{
+					return true;
+				}
+			}
+
+			return PathMatchSpecW(fullPathLower.c_str(), token.c_str()) != FALSE;
+		}
+
+		return relativePathLowerWithLeadingSlash.find(token) != std::wstring::npos;
 	}
 
 	if (token.size() > 1 && token[0] == L'.' && token.find(L'*') == std::wstring::npos && token.find(L'?') == std::wstring::npos)
@@ -183,7 +271,7 @@ static bool FilterMatchToken(const std::wstring& fileNameLower, const std::wstri
 		return extWithDotLower == token;
 	}
 
-	if (token.find(L'*') != std::wstring::npos || token.find(L'?') != std::wstring::npos)
+	if (hasWildcard)
 	{
 		return PathMatchSpecW(fileNameLower.c_str(), token.c_str()) != FALSE;
 	}
@@ -201,21 +289,37 @@ static bool FilterMatchToken(const std::wstring& fileNameLower, const std::wstri
 			return true;
 		}
 	}
-
-	return fileNameLower.find(token) != std::wstring::npos;
+	
+	return fullPathLower.find(token) != std::wstring::npos;
 }
 
 static bool PassesFilters(const WatchedFolder& watchedFolder, const std::wstring& fullPath)
 {
 	std::wstring fileNameLower = ToLower(std::fs::path(fullPath).filename().wstring());
 	std::wstring extLower = ToLower(std::fs::path(fullPath).extension().wstring());
+	std::wstring fullPathLower = NormalizePathSlashes(ToLower(std::fs::path(fullPath).lexically_normal().wstring()));
+
+	std::wstring relativePathLower = fileNameLower;
+	std::error_code errorCode;
+	std::fs::path relativePath = std::fs::relative(std::fs::path(fullPath), std::fs::path(watchedFolder.path), errorCode);
+	if (!errorCode)
+	{
+		std::wstring relativePathCandidate = relativePath.wstring();
+		if (!relativePathCandidate.empty() && relativePathCandidate.rfind(L"..", 0) != 0)
+		{
+			relativePathLower = ToLower(relativePathCandidate);
+		}
+	}
+
+	relativePathLower = NormalizePathSlashes(relativePathLower);
+	std::wstring relativePathLowerWithLeadingSlash = L"\\" + relativePathLower;
 
 	std::vector<std::wstring> includeTokens = SplitCSV(watchedFolder.includeFiltersCSV);
 	std::vector<std::wstring> excludeTokens = SplitCSV(watchedFolder.excludeFiltersCSV);
 
 	for (const auto& excludeToken : excludeTokens)
 	{
-		if (FilterMatchToken(fileNameLower, extLower, excludeToken))
+		if (FilterMatchToken(fileNameLower, extLower, relativePathLowerWithLeadingSlash, fullPathLower, excludeToken))
 		{
 			return false;
 		}
@@ -228,7 +332,7 @@ static bool PassesFilters(const WatchedFolder& watchedFolder, const std::wstring
 
 	for (const auto& includeToken : includeTokens)
 	{
-		if (FilterMatchToken(fileNameLower, extLower, includeToken))
+		if (FilterMatchToken(fileNameLower, extLower, relativePathLowerWithLeadingSlash, fullPathLower, includeToken))
 		{
 			return true;
 		}
@@ -747,8 +851,9 @@ static void UI_WatchedFolders()
 		"Tokens are comma-separated.\n"
 		"Supported token types:\n"
 		"  - Extension: .png or png\n"
-		"  - Wildcards: *.tmp, foo*.txt (matches filename)\n"
-		"  - Substring: foo (matches filename substring)\n"
+		"  - Wildcards (DOS style): *.tmp, foo*.txt\n"
+		"  - Path wildcards: \\\\.* (matches any path containing \\\\.something)\n"
+		"  - Substring: foo\n"
 		"Exclude wins over include. If include list is empty, everything is included (subject to exclude)."
 	);
 
@@ -815,7 +920,7 @@ static void UI_WatchedFolders()
 			}
 
 			ImGui::TextUnformatted("Exclude filters (CSV)");
-			ImGui::HelpTooltip("Examples:\n  .tmp, .bak\n  *autosave*\nExclude is checked first and always wins.");
+			ImGui::HelpTooltip("Examples:\n  .tmp, .bak\n  *autosave*\n  \\\\.*\nExclude is checked first and always wins.");
 			ImGui::SetNextItemWidth(-1.0f);
 
 			if (ImGui::InputTextStdString("##exclude", excludeText))
@@ -895,14 +1000,14 @@ static bool HandleRowSelectAndHighlight(int rowIndex, int& selectedRowIndex, flo
 static std::wstring BackupTimestampFromBackupPath(const std::wstring& backupPath)
 {
 	std::wstring backupFileName = std::fs::path(backupPath).filename().wstring();
-
-	size_t markerPos = backupFileName.rfind(L"_backup_");
-	if (markerPos == std::wstring::npos)
+	std::wstring outDate;
+	std::wstring outTime;
+	if (!ParseBackupTimestamp(backupFileName, outDate, outTime))
 	{
 		return L"-";
 	}
 
-	return backupFileName.substr(markerPos + 8);
+	return outDate + L" " + outTime;
 }
 
 static void UI_BackedUpFiles()
@@ -928,8 +1033,8 @@ static void UI_BackedUpFiles()
 
 	if (ImGui::BeginTable("backed_up_files", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY))
 	{
-		ImGui::TableSetupColumn("Folder",   ImGuiTableColumnFlags_WidthStretch, 1.5f);
-		ImGui::TableSetupColumn("File", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+		ImGui::TableSetupColumn("Path",   ImGuiTableColumnFlags_WidthStretch, 1.5f);
+		ImGui::TableSetupColumn("Filename", ImGuiTableColumnFlags_WidthStretch, 1.0f);
 		ImGui::TableSetupColumn("Backups",  ImGuiTableColumnFlags_WidthStretch, 2.0f);
 		ImGui::TableHeadersRow();
 
@@ -1072,11 +1177,11 @@ static void UI_BackedUpFiles()
 
 				if (ImGui::BeginTable("##backup_list_table", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_ScrollY))
 				{
-					ImGui::TableSetupColumn("Timestamp", ImGuiTableColumnFlags_WidthFixed, 190.0f);
-					ImGui::TableSetupColumn("Backup path", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+					ImGui::TableSetupColumn("Date & Time", ImGuiTableColumnFlags_WidthFixed, 190.0f);
+					ImGui::TableSetupColumn("Backup Path", ImGuiTableColumnFlags_WidthStretch, 1.0f);
 					ImGui::TableHeadersRow();
 
-					for (int backupIndex = 0; backupIndex < (int)backupPaths.size(); ++backupIndex)
+					for (int backupIndex = (int)backupPaths.size() - 1; backupIndex >= 0 ; --backupIndex)
 					{
 						const std::wstring& backupPath = backupPaths[backupIndex];
 
@@ -1210,7 +1315,7 @@ static void UI_History()
 
 		std::lock_guard<std::mutex> lock(g_operationsMutex);
 
-		for (int operationIndex = 0; operationIndex < (int)g_operations.size(); ++operationIndex)
+		for (int operationIndex = (int)g_operations.size() - 1; operationIndex >= 0; --operationIndex)
 		{
 			const BackupOperation& backupOperation = g_operations[operationIndex];
 
@@ -1221,7 +1326,8 @@ static void UI_History()
 			float rowMinY = ImGui::GetCursorScreenPos().y;
 
 			ImGui::TableSetColumnIndex(0);
-			ImGui::TextUnformatted(WToUTF8(backupOperation.timeStamp).c_str());
+			std::wstring formattedTimeStamp = FormatOperationTimestampForDisplay(backupOperation.timeStamp);
+			ImGui::TextUnformatted(WToUTF8(formattedTimeStamp).c_str());
 
 			ImGui::TableSetColumnIndex(1);
 			{
