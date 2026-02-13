@@ -1959,7 +1959,7 @@ static void UI_Settings()
 		ImGui::EndTable();
 
 
-		if (ImGui::Button("Apply"))
+		if (ImGui::Button("Apply", ImVec2(80, 30)))
 		{
 			MarkSettingsDirty();
 			SaveSettings();
