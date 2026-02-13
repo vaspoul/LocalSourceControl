@@ -849,15 +849,6 @@ static void UI_WatchedFolders()
 	static int selectedFolderIndex = -1;
 
 	ImGui::TextUnformatted("Watched folders");
-	ImGui::HelpTooltip(
-		"Tokens are comma-separated.\n"
-		"Supported token types:\n"
-		"  - Extension: .png or png\n"
-		"  - Wildcards (DOS style): *.tmp, foo*.txt\n"
-		"  - Path wildcards: \\\\.* (matches any path containing \\\\.something)\n"
-		"  - Substring: foo\n"
-		"Exclude wins over include. If include list is empty, everything is included (subject to exclude)."
-	);
 
 	if (g_settings.watched.empty())
 	{
@@ -918,113 +909,116 @@ static void UI_WatchedFolders()
 
 		ImGui::TableSetColumnIndex(1);
 
-		if (selectedFolderIndex < 0 || selectedFolderIndex >= (int)g_settings.watched.size())
+		if (ImGui::BeginChild("properties", ImVec2(0.0f, 0.0f), true))
 		{
-			ImGui::TextDisabled("No watched folder selected.");
-		}
-		else
-		{
-			WatchedFolder& watchedFolder = g_settings.watched[selectedFolderIndex];
-
-			if (ImGui::BeginTable("watched_folder_props_grid", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingFixedFit))
+			if (selectedFolderIndex < 0 || selectedFolderIndex >= (int)g_settings.watched.size())
 			{
-				ImGui::TableSetupColumn("Property", ImGuiTableColumnFlags_WidthFixed, 170.0f);
-				ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+				ImGui::TextDisabled("No watched folder selected.");
+			}
+			else
+			{
+				WatchedFolder& watchedFolder = g_settings.watched[selectedFolderIndex];
 
-				ImGui::TableNextRow();
-				ImGui::TableSetColumnIndex(0);
-				ImGui::TextUnformatted("Path");
-				ImGui::TableSetColumnIndex(1);
-				std::string watchedPathUtf8 = WToUTF8(watchedFolder.path);
-				ImGui::TextClickable("%s", watchedPathUtf8.c_str());
-				if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+				if (ImGui::BeginTable("watched_folder_props_grid", 2, ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_SizingFixedFit))
 				{
-					OpenExplorerSelectPath(watchedFolder.path);
-				}
-				if (ImGui::BeginPopupContextItem("watched_path_context"))
-				{
-					if (ImGui::MenuItem("Open in Explorer"))
+					ImGui::TableSetupColumn("Property", ImGuiTableColumnFlags_WidthFixed, 170.0f);
+					ImGui::TableSetupColumn("Value", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+
+					ImGui::TableNextRow();
+					ImGui::TableSetColumnIndex(0);
+					ImGui::TextUnformatted("Path");
+					ImGui::TableSetColumnIndex(1);
+					std::string watchedPathUtf8 = WToUTF8(watchedFolder.path);
+					ImGui::TextClickable("%s", watchedPathUtf8.c_str());
+					if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 					{
 						OpenExplorerSelectPath(watchedFolder.path);
 					}
-					ImGui::EndPopup();
-				}
-
-				ImGui::SameLine();
-
-				if (ImGui::Button("..."))
-				{
-					std::wstring selectedPath = BrowseForFolder(L"Select folder to watch");
-					if (!selectedPath.empty())
+					if (ImGui::BeginPopupContextItem("watched_path_context"))
 					{
-						watchedFolder.path = selectedPath;
+						if (ImGui::MenuItem("Open in Explorer"))
+						{
+							OpenExplorerSelectPath(watchedFolder.path);
+						}
+						ImGui::EndPopup();
+					}
+
+					ImGui::SameLine();
+
+					if (ImGui::Button("..."))
+					{
+						std::wstring selectedPath = BrowseForFolder(L"Select folder to watch");
+						if (!selectedPath.empty())
+						{
+							watchedFolder.path = selectedPath;
+							MarkSettingsDirty();
+							SaveSettings();
+							StartWatchersFromSettings();
+						}
+					}
+
+					ImGui::TableNextRow();
+					ImGui::TableSetColumnIndex(0);
+					ImGui::TextUnformatted("Include sub-folders");
+					ImGui::TableSetColumnIndex(1);
+					if (ImGui::Checkbox("##include_subfolders", &watchedFolder.includeSubfolders))
+					{
+						MarkSettingsDirty();
+					}
+
+					ImGui::TableNextRow();
+					ImGui::TableSetColumnIndex(0);
+					ImGui::TextUnformatted("Include filters");
+
+					ImGui::SameLine();
+					ImGui::HelpTooltip("Examples: .png, png, *.tmp, foo*, *bar*");
+
+					ImGui::TableSetColumnIndex(1);
+					{
+						ImGui::SetNextItemWidth(-1.0f);
+						if (ImGui::InputTextStdString("##include_filters", watchedFolder.includeFiltersCSV))
+						{
+							MarkSettingsDirty();
+						}
+					}
+
+					ImGui::TableNextRow();
+					ImGui::TableSetColumnIndex(0);
+					ImGui::TextUnformatted("Exclude filters");
+
+					ImGui::SameLine();
+					ImGui::HelpTooltip("Examples: .tmp, *autosave*, \\\\.*");
+
+					ImGui::TableSetColumnIndex(1);
+					{
+						ImGui::SetNextItemWidth(-1.0f);
+						if (ImGui::InputTextStdString("##exclude_filters", watchedFolder.excludeFiltersCSV))
+						{
+							MarkSettingsDirty();
+						}
+					}
+
+					ImGui::TableNextRow();
+					ImGui::TableSetColumnIndex(0);
+					ImGui::TextUnformatted("Actions");
+					ImGui::TableSetColumnIndex(1);
+					if (ImGui::Button("Apply All"))
+					{
 						MarkSettingsDirty();
 						SaveSettings();
 						StartWatchersFromSettings();
 					}
-				}
-
-				ImGui::TableNextRow();
-				ImGui::TableSetColumnIndex(0);
-				ImGui::TextUnformatted("Include sub-folders");
-				ImGui::TableSetColumnIndex(1);
-				if (ImGui::Checkbox("##include_subfolders", &watchedFolder.includeSubfolders))
-				{
-					MarkSettingsDirty();
-				}
-
-				ImGui::TableNextRow();
-				ImGui::TableSetColumnIndex(0);
-				ImGui::TextUnformatted("Include filters");
-
-				ImGui::SameLine();
-				ImGui::HelpTooltip("Examples: .png, png, *.tmp, foo*, *bar*");
-
-				ImGui::TableSetColumnIndex(1);
-				{
-					ImGui::SetNextItemWidth(-1.0f);
-					if (ImGui::InputTextStdString("##include_filters", watchedFolder.includeFiltersCSV))
+					ImGui::SameLine();
+					if (ImGui::Button("Remove Folder"))
 					{
-						MarkSettingsDirty();
+						removeSelectedFolder = true;
 					}
+
+					ImGui::EndTable();
 				}
-
-				ImGui::TableNextRow();
-				ImGui::TableSetColumnIndex(0);
-				ImGui::TextUnformatted("Exclude filters");
-
-				ImGui::SameLine();
-				ImGui::HelpTooltip("Examples: .tmp, *autosave*, \\\\.*");
-
-				ImGui::TableSetColumnIndex(1);
-				{
-					ImGui::SetNextItemWidth(-1.0f);
-					if (ImGui::InputTextStdString("##exclude_filters", watchedFolder.excludeFiltersCSV))
-					{
-						MarkSettingsDirty();
-					}
-				}
-
-				ImGui::TableNextRow();
-				ImGui::TableSetColumnIndex(0);
-				ImGui::TextUnformatted("Actions");
-				ImGui::TableSetColumnIndex(1);
-				if (ImGui::Button("Apply All"))
-				{
-					MarkSettingsDirty();
-					SaveSettings();
-					StartWatchersFromSettings();
-				}
-				ImGui::SameLine();
-				if (ImGui::Button("Remove Folder"))
-				{
-					removeSelectedFolder = true;
-				}
-
-				ImGui::EndTable();
 			}
 		}
-
+		ImGui::EndChild();
 		ImGui::EndTable();
 	}
 
