@@ -860,56 +860,167 @@ static void UI_WatchedFolders()
 	}
 
 	bool removeSelectedFolder = false;
+	bool hasSelectedFolderRect = false;
+	ImVec2 selectedFolderRectMin = {};
+	ImVec2 selectedFolderRectMax = {};
+	ImVec2 propertiesRectMin = {};
+	ImVec2 propertiesRectMax = {};
+	bool hasPropertiesRect = false;
 
-	if (ImGui::BeginTable("watched_folders_split", 2, ImGuiTableFlags_BordersInnerV | ImGuiTableFlags_Resizable | ImGuiTableFlags_SizingStretchProp))
+	static float leftPaneWidth = 320.0f;
+	const float splitterWidth = 6.0f;
+	const float minLeftPaneWidth = 180.0f;
+	const float minRightPaneWidth = 320.0f;
+
+	float totalWidth = ImGui::GetContentRegionAvail().x;
+	float maxLeftPaneWidth = totalWidth - splitterWidth - minRightPaneWidth;
+	if (maxLeftPaneWidth < minLeftPaneWidth)
 	{
-		ImGui::TableSetupColumn("Folders", ImGuiTableColumnFlags_WidthFixed, 320.0f);
-		ImGui::TableSetupColumn("Properties", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-		ImGui::TableNextRow();
+		maxLeftPaneWidth = minLeftPaneWidth;
+	}
+	if (leftPaneWidth < minLeftPaneWidth)
+	{
+		leftPaneWidth = minLeftPaneWidth;
+	}
+	if (leftPaneWidth > maxLeftPaneWidth)
+	{
+		leftPaneWidth = maxLeftPaneWidth;
+	}
 
-		ImGui::TableSetColumnIndex(0);
-		if (ImGui::BeginChild("watched_folders_list", ImVec2(0.0f, 0.0f), true))
+	if (ImGui::BeginChild("watched_folders_list", ImVec2(leftPaneWidth, 0)))
+	{
+		for (int folderIndex = 0; folderIndex < (int)g_settings.watched.size(); ++folderIndex)
 		{
-			for (int folderIndex = 0; folderIndex < (int)g_settings.watched.size(); ++folderIndex)
+			const std::wstring& watchedPath = g_settings.watched[folderIndex].path;
+			std::string watchedPathUtf8 = WToUTF8(watchedPath);
+			
+			bool isSelected = (folderIndex == selectedFolderIndex);
+
+			ImGui::PushID(folderIndex);
+
+			if (ImGui::BeginChild("folder_outer", ImVec2(0.0f, 60.0f)))
 			{
-				const std::wstring& watchedPath = g_settings.watched[folderIndex].path;
-				std::string watchedPathUtf8 = WToUTF8(watchedPath);
+				ImGui::SetCursorPos(ImGui::GetCursorPos() + ImVec2(8,8));
 
-				bool isSelected = (folderIndex == selectedFolderIndex);
-				if (ImGui::Selectable(watchedPathUtf8.c_str(), isSelected))
+				if (ImGui::BeginChild("folder_inner", ImGui::GetContentRegionAvail() - ImVec2(0,8), ImGuiChildFlags_Borders))
 				{
-					selectedFolderIndex = folderIndex;
-				}
+					ImVec2 innerMin = ImGui::GetWindowPos();
+					ImVec2 innerSize = ImGui::GetWindowSize();
+					ImVec2 innerMax(innerMin.x + innerSize.x, innerMin.y + innerSize.y);
 
-				if (ImGui::IsItemHovered())
-				{
-					ImGui::SetTooltip("%s", watchedPathUtf8.c_str());
+					bool isHovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem);
+					if (isHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+					{
+						selectedFolderIndex = folderIndex;
+						isSelected = true;
+					}
+
+					ImDrawList* innerDrawList = ImGui::GetWindowDrawList();
+					if (isSelected)
+					{
+						innerDrawList->AddRectFilled(
+							ImVec2(innerMin.x + 1.0f, innerMin.y + 1.0f),
+							ImVec2(innerMax.x - 1.0f, innerMax.y - 1.0f),
+							ImGui::GetColorU32(ImGuiCol_Header));
+					}
+					else if (isHovered)
+					{
+						innerDrawList->AddRectFilled(
+							ImVec2(innerMin.x + 1.0f, innerMin.y + 1.0f),
+							ImVec2(innerMax.x - 1.0f, innerMax.y - 1.0f),
+							ImGui::GetColorU32(ImGuiCol_HeaderHovered));
+					}
+
+					const float textPaddingX = 10.0f;
+					ImVec2 textSize = ImGui::CalcTextSize(watchedPathUtf8.c_str());
+					float textY = innerMin.y + ((innerSize.y - textSize.y) * 0.5f);
+					ImGui::SetCursorScreenPos(ImVec2(innerMin.x + textPaddingX, textY));
+					ImGui::TextUnformatted(watchedPathUtf8.c_str());
+
+					float visibleTextWidth = innerSize.x - (textPaddingX * 2.0f);
+					bool isPathClipped = textSize.x > visibleTextWidth;
+					if (isPathClipped && isHovered)
+					{
+						ImGui::SetTooltip("%s", watchedPathUtf8.c_str());
+					}
 				}
+				ImGui::EndChild();
+			}
+			ImGui::EndChild();
+
+			if (isSelected)
+			{
+				hasSelectedFolderRect = true;
+				selectedFolderRectMin = ImGui::GetItemRectMin();
+				selectedFolderRectMax = ImGui::GetItemRectMax();
 			}
 
-			if (ImGui::Button("Add Folder", ImVec2(-1.0f, 0.0f)))
+			ImGui::PopID();
+		}
+
+		ImGui::Dummy(ImVec2(10, 10));
+
+		const float addButtonWidth = 150.0f;
+		float addButtonX = ImGui::GetCursorPosX();
+		float addButtonAvail = ImGui::GetContentRegionAvail().x;
+		if (addButtonAvail > addButtonWidth)
+		{
+			addButtonX += (addButtonAvail - addButtonWidth) * 0.5f;
+		}
+
+		ImGui::SetCursorPosX(addButtonX);
+
+		if (ImGui::Button("Add Folder", ImVec2(addButtonWidth, 30.0f)))
+		{
+			std::wstring selectedPath = BrowseForFolder(L"Select folder to watch");
+			if (!selectedPath.empty())
 			{
-				std::wstring selectedPath = BrowseForFolder(L"Select folder to watch");
-				if (!selectedPath.empty())
-				{
-					WatchedFolder newWatchedFolder = {};
-					newWatchedFolder.path = selectedPath;
-					newWatchedFolder.includeSubfolders = true;
+				WatchedFolder newWatchedFolder = {};
+				newWatchedFolder.path = selectedPath;
+				newWatchedFolder.includeSubfolders = true;
 
-					g_settings.watched.push_back(newWatchedFolder);
-					selectedFolderIndex = (int)g_settings.watched.size() - 1;
+				g_settings.watched.push_back(newWatchedFolder);
+				selectedFolderIndex = (int)g_settings.watched.size() - 1;
 
-					MarkSettingsDirty();
-					SaveSettings();
-					StartWatchersFromSettings();
-				}
+				MarkSettingsDirty();
+				SaveSettings();
+				StartWatchersFromSettings();
 			}
 		}
-		ImGui::EndChild();
+	}
+	ImGui::EndChild();
 
-		ImGui::TableSetColumnIndex(1);
+	ImGui::SameLine();
 
-		if (ImGui::BeginChild("properties", ImVec2(0.0f, 0.0f), true))
+	ImGui::InvisibleButton("watched_folders_splitter", ImVec2(splitterWidth, ImGui::GetContentRegionAvail().y));
+
+	if (ImGui::IsItemActive())
+	{
+		leftPaneWidth += ImGui::GetIO().MouseDelta.x;
+
+		if (leftPaneWidth < minLeftPaneWidth)
+		{
+			leftPaneWidth = minLeftPaneWidth;
+		}
+
+		if (leftPaneWidth > maxLeftPaneWidth)
+		{
+			leftPaneWidth = maxLeftPaneWidth;
+		}
+	}
+
+	if (ImGui::IsItemHovered() || ImGui::IsItemActive())
+	{
+		ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+	}
+
+	ImGui::SameLine();
+
+	if (ImGui::BeginChild("properties", ImVec2(0, 0)))
+	{
+		ImGui::SetCursorPos(ImGui::GetCursorPos() + ImVec2(8,8));
+
+		if (ImGui::BeginChild("properties_inner", ImGui::GetContentRegionAvail() - ImVec2(8,8)))
 		{
 			if (selectedFolderIndex < 0 || selectedFolderIndex >= (int)g_settings.watched.size())
 			{
@@ -1019,7 +1130,69 @@ static void UI_WatchedFolders()
 			}
 		}
 		ImGui::EndChild();
-		ImGui::EndTable();
+	}
+	ImGui::EndChild();
+
+	hasPropertiesRect = true;
+	propertiesRectMin = ImGui::GetItemRectMin();
+	propertiesRectMax = ImGui::GetItemRectMax();
+
+	if (hasPropertiesRect)
+	{
+		ImDrawList* drawList = ImGui::GetWindowDrawList();
+		ImU32 borderColor = ImGui::GetColorU32(ImGuiCol_Tab) | 0xFF000000;
+		float borderThickness = 5.0f;
+
+		if (hasSelectedFolderRect)
+		{
+			//
+			//                       2                        3
+			//                       .------------------------.
+			// 0                    1|                        |
+			// .---------------------.                        |
+			// |                                              |
+			// .---------------------.                        |
+			// 7                   6 |                        |
+			//                       |                        |
+			//                     5 .------------------------. 4
+			//
+
+			ImVec2 p0 = ImVec2(selectedFolderRectMin.x, selectedFolderRectMin.y);
+			ImVec2 p1 = ImVec2(propertiesRectMin.x, selectedFolderRectMin.y);
+			ImVec2 p2 = ImVec2(propertiesRectMin.x, propertiesRectMin.y);
+			ImVec2 p3 = ImVec2(propertiesRectMax.x, propertiesRectMin.y);
+			ImVec2 p4 = ImVec2(propertiesRectMax.x, propertiesRectMax.y);
+			ImVec2 p5 = ImVec2(propertiesRectMin.x, propertiesRectMax.y);
+			ImVec2 p6 = ImVec2(propertiesRectMin.x, selectedFolderRectMax.y);
+			ImVec2 p7 = ImVec2(selectedFolderRectMin.x, selectedFolderRectMax.y);
+
+			if (p1.y == p2.y)
+			{
+				ImVec2 outlinePoints[] = { p0, p3, p4, p5, p6, p7 };
+				drawList->AddPolyline(outlinePoints, IM_ARRAYSIZE(outlinePoints), borderColor, ImDrawFlags_RoundCornersAll | ImDrawFlags_Closed, borderThickness);
+			}
+			else if (p6.y == p5.y)
+			{
+				ImVec2 outlinePoints[] = { p0, p1, p2, p3, p4, p7 };
+				drawList->AddPolyline(outlinePoints, IM_ARRAYSIZE(outlinePoints), borderColor, ImDrawFlags_RoundCornersAll | ImDrawFlags_Closed, borderThickness);
+			}
+			else
+			{
+				ImVec2 outlinePoints[] = { p0, p1, p2, p3, p4, p5, p6, p7 };
+				drawList->AddPolyline(outlinePoints, IM_ARRAYSIZE(outlinePoints), borderColor, ImDrawFlags_RoundCornersAll | ImDrawFlags_Closed, borderThickness);
+			}
+		}
+		else
+		{
+			ImVec2 propertiesRectOutline[] =
+			{
+				ImVec2(propertiesRectMin.x, propertiesRectMin.y),
+				ImVec2(propertiesRectMax.x, propertiesRectMin.y),
+				ImVec2(propertiesRectMax.x, propertiesRectMax.y),
+				ImVec2(propertiesRectMin.x, propertiesRectMax.y),
+			};
+			drawList->AddPolyline(propertiesRectOutline, IM_ARRAYSIZE(propertiesRectOutline), borderColor, ImDrawFlags_Closed, borderThickness);
+		}
 	}
 
 	if (removeSelectedFolder && selectedFolderIndex >= 0 && selectedFolderIndex < (int)g_settings.watched.size())
