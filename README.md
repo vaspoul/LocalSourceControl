@@ -2,6 +2,7 @@
 
 LocalSourceControl is a lightweight desktop backup tool for local file history.  
 It watches selected folders and automatically stores timestamped backup copies of changed files on your machine.
+It's mainly aimed at developers wishing to keep track of local changes in-between commits to actual source control.
 
 ## What It Does
 - Watches one or more folders for file changes.
