@@ -1,3 +1,5 @@
+#include "main.h"
+
 // dear imgui, v1.92.5
 // (tables and columns code)
 
