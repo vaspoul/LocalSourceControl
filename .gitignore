@@ -1,3 +1,5 @@
 .vs/
-BUILD/
+BUILD/binaries
+BUILD/intermediate
+BUILD/**/*.user
 backup_settings.txt
