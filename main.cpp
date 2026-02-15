@@ -35,6 +35,9 @@ static std::map<std::wstring, std::vector<std::wstring>>	g_backupIndex;
 static std::mutex											g_watchersMutex;
 static std::vector<std::unique_ptr<FolderWatcher>>			g_watchers;
 
+static std::atomic<uint32_t>								g_backupsToday;
+static std::wstring											g_todayPrefix;
+		
 // Sanitize "C:\foo\bar" -> "C\foo\bar" so it can be nested under backup root
 static std::wstring SanitizePathForBackup(const std::wstring& absolutePath)
 {
@@ -191,36 +194,30 @@ static void PushOperation(const BackupOperation& backupOperation)
 	{
 		g_operations.erase(g_operations.begin(), g_operations.begin() + (g_operations.size() - kOperationHistoryMaxCount));
 	}
-}
 
-static uint32_t CountBackupsForToday()
-{
-	using namespace std::chrono;
-	auto now = system_clock::now();
-	auto tt = system_clock::to_time_t(now);
-	tm tmv = {};
-	localtime_s(&tmv, &tt);
-
-	wchar_t prefix[32] = {};
-	swprintf_s(prefix, L"%04d_%02d_%02d__",
-		tmv.tm_year + 1900,
-		tmv.tm_mon + 1,
-		tmv.tm_mday);
-
-	const size_t prefixLen = wcslen(prefix);
-	uint32_t count = 0;
-
-	std::lock_guard<std::mutex> lock(g_operationsMutex);
-	for (const BackupOperation& operation : g_operations)
+	if (backupOperation.result == L"OK")
 	{
-		if (operation.timeStamp.size() >= prefixLen &&
-			wcsncmp(operation.timeStamp.c_str(), prefix, prefixLen) == 0)
+		using namespace std::chrono;
+		auto now = system_clock::now();
+		auto tt = system_clock::to_time_t(now);
+		tm tmv = {};
+		localtime_s(&tmv, &tt);
+
+		wchar_t todayPrefix[64] = {};
+		swprintf_s(todayPrefix, L"_backup_%04d_%02d_%02d__", tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday);
+		if (g_todayPrefix != todayPrefix)
 		{
-			++count;
+			g_todayPrefix = todayPrefix;
+			g_backupsToday = 0;
+		}
+
+		if (backupOperation.backupPath.find(g_todayPrefix) != std::wstring::npos)
+		{
+			++g_backupsToday;
+
+			TrayUpdateBackupCount(g_backupsToday);
 		}
 	}
-
-	return count;
 }
 
 static uint64_t FileTimeToU64(const FILETIME& fileTime)
@@ -607,6 +604,8 @@ static void ScanBackupFolder()
 	{
 		return;
 	}
+	
+	g_backupsToday = 0;
 
 	for (auto iterator = std::fs::recursive_directory_iterator(backupRootPath, std::fs::directory_options::skip_permission_denied, errorCode); iterator != std::fs::recursive_directory_iterator(); ++iterator)
 	{
@@ -632,6 +631,11 @@ static void ScanBackupFolder()
 
 		std::wstring originalStem = backupStem.substr(0, backupMarkerPos);
 		std::wstring originalExt = backupFilePath.extension().wstring();
+
+		if (backupStem.find(g_todayPrefix) != std::wstring::npos)
+		{
+			g_backupsToday += 1;
+		}
 
 		std::fs::path relativeDir = std::fs::relative( backupFilePath.parent_path(), backupRootPath, errorCode);
 
@@ -668,6 +672,8 @@ static void ScanBackupFolder()
 	}
 
 	EnforceGlobalSizeLimit(std::fs::path(g_settings.backupRoot), g_settings.maxBackupSizeMB);
+
+	TrayUpdateBackupCount(g_backupsToday);
 }
 
 static bool SkipBackup(FolderWatcher& folderWatcher, const std::wstring& filePath, uint64_t nowTick)
@@ -2004,6 +2010,17 @@ static void UI_Settings()
 
 void AppInit()
 {
+	using namespace std::chrono;
+	auto now = system_clock::now();
+	auto tt = system_clock::to_time_t(now);
+	tm tmv = {};
+	localtime_s(&tmv, &tt);
+
+	wchar_t todayPrefix[64] = {};
+	swprintf_s(todayPrefix, L"_backup_%04d_%02d_%02d__", tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday);
+
+	g_todayPrefix = todayPrefix;
+
 	ScanBackupFolder();
 	StartWatchersFromSettings();
 }
@@ -2011,20 +2028,26 @@ void AppInit()
 bool AppLoop()
 {
 	MaybeSaveSettingsThrottled();
-	
-	static uint64_t lastTooltipUpdateTick = 0;
-	static uint32_t lastTooltipCount = UINT32_MAX;
 
-	const uint64_t nowTick = GetTickCount64();
-	if ((nowTick - lastTooltipUpdateTick) >= 2000)
+	static uint64_t lastTodayPrefixCheck = 0;
+	if ((GetTickCount64() - lastTodayPrefixCheck) >= 10000)
 	{
-		uint32_t countToday = CountBackupsForToday();
-		if (countToday != lastTooltipCount)
+		using namespace std::chrono;
+		auto now = system_clock::now();
+		auto tt = system_clock::to_time_t(now);
+		tm tmv = {};
+		localtime_s(&tmv, &tt);
+
+		wchar_t todayPrefix[64] = {};
+		swprintf_s(todayPrefix, L"_backup_%04d_%02d_%02d__", tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday);
+
+		if (g_todayPrefix != todayPrefix)
 		{
-			TrayUpdateBackupCount(countToday);
-			lastTooltipCount = countToday;
+			g_todayPrefix = todayPrefix;
+			ScanBackupFolder();
 		}
-		lastTooltipUpdateTick = nowTick;
+
+		lastTodayPrefixCheck = GetTickCount64();
 	}
 
 	return false;
