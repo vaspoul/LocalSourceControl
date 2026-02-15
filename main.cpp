@@ -193,6 +193,36 @@ static void PushOperation(const BackupOperation& backupOperation)
 	}
 }
 
+static uint32_t CountBackupsForToday()
+{
+	using namespace std::chrono;
+	auto now = system_clock::now();
+	auto tt = system_clock::to_time_t(now);
+	tm tmv = {};
+	localtime_s(&tmv, &tt);
+
+	wchar_t prefix[32] = {};
+	swprintf_s(prefix, L"%04d_%02d_%02d__",
+		tmv.tm_year + 1900,
+		tmv.tm_mon + 1,
+		tmv.tm_mday);
+
+	const size_t prefixLen = wcslen(prefix);
+	uint32_t count = 0;
+
+	std::lock_guard<std::mutex> lock(g_operationsMutex);
+	for (const BackupOperation& operation : g_operations)
+	{
+		if (operation.timeStamp.size() >= prefixLen &&
+			wcsncmp(operation.timeStamp.c_str(), prefix, prefixLen) == 0)
+		{
+			++count;
+		}
+	}
+
+	return count;
+}
+
 static uint64_t FileTimeToU64(const FILETIME& fileTime)
 {
 	ULARGE_INTEGER fileTime64 = {};
@@ -1978,6 +2008,21 @@ void AppInit()
 bool AppLoop()
 {
 	MaybeSaveSettingsThrottled();
+	
+	static uint64_t lastTooltipUpdateTick = 0;
+	static uint32_t lastTooltipCount = UINT32_MAX;
+
+	const uint64_t nowTick = GetTickCount64();
+	if ((nowTick - lastTooltipUpdateTick) >= 2000)
+	{
+		uint32_t countToday = CountBackupsForToday();
+		if (countToday != lastTooltipCount)
+		{
+			TrayUpdateBackupCount(countToday);
+			lastTooltipCount = countToday;
+		}
+		lastTooltipUpdateTick = nowTick;
+	}
 
 	return false;
 }

@@ -24,9 +24,31 @@ static const UINT				kTrayMenuExitId = 1002;
 static bool						g_isInTray = false;
 static NOTIFYICONDATAW			g_trayIconData = {};
 static HICON					g_trayIconHandle = nullptr;
+static HANDLE					g_singleInstanceMutex = nullptr;
 
 
 LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam);
+
+static void BringExistingInstanceToFront()
+{
+	const wchar_t* kWindowClassName = L"ContinuousBackupDX11Wnd";
+	HWND existingWindow = FindWindowW(kWindowClassName, nullptr);
+	if (!existingWindow)
+	{
+		return;
+	}
+
+	if (IsIconic(existingWindow))
+	{
+		ShowWindow(existingWindow, SW_RESTORE);
+	}
+	else
+	{
+		ShowWindow(existingWindow, SW_SHOW);
+	}
+
+	SetForegroundWindow(existingWindow);
+}
 
 static void CreateRenderTarget()
 {
@@ -168,6 +190,20 @@ static void TrayRemove()
 	ZeroMemory(&g_trayIconData, sizeof(g_trayIconData));
 }
 
+void TrayUpdateBackupCount(uint32_t count)
+{
+	if (!g_isInTray)
+	{
+		return;
+	}
+
+	wchar_t tooltip[128] = {};
+	swprintf_s(tooltip, L"LocalSourceControl | Backups today: %u", count);
+	wcsncpy_s(g_trayIconData.szTip, tooltip, _TRUNCATE);
+	g_trayIconData.uFlags = NIF_TIP;
+	Shell_NotifyIconW(NIM_MODIFY, &g_trayIconData);
+}
+
 static void TrayShowContextMenu(HWND windowHandle)
 {
 	POINT cursorPos = {};
@@ -206,6 +242,15 @@ static void RestoreFromTray(HWND windowHandle)
 
 int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
 {
+	g_singleInstanceMutex = CreateMutexW(nullptr, TRUE, L"LocalSourceControl_SingleInstance_Mutex");
+	if (g_singleInstanceMutex && GetLastError() == ERROR_ALREADY_EXISTS)
+	{
+		BringExistingInstanceToFront();
+		CloseHandle(g_singleInstanceMutex);
+		g_singleInstanceMutex = nullptr;
+		return 0;
+	}
+
 	HRESULT hrCo = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
 	(void)hrCo;
 
@@ -337,6 +382,12 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
 	UnregisterClassW(wc.lpszClassName, wc.hInstance);
 
 	CoUninitialize();
+
+	if (g_singleInstanceMutex)
+	{
+		CloseHandle(g_singleInstanceMutex);
+		g_singleInstanceMutex = nullptr;
+	}
 	return 0;
 }
 
