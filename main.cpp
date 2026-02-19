@@ -535,7 +535,7 @@ static void EnforceGlobalSizeLimit(const std::fs::path& backupRootPath, uint32_t
 	std::vector<GlobalBackupItem> allBackups;
 
 	{
-		std::shared_lock<std::shared_mutex> indexLock(g_indexMutex);
+		std::unique_lock<std::shared_mutex> indexLock(g_indexMutex);
 
 		for (const BackupFile& entry : g_backupIndex)
 		{
@@ -1382,13 +1382,58 @@ static void UI_BackedUpFiles()
 
 		if (ImGui::BeginChild("backed_up_files_left", ImVec2(leftPaneWidth, paneHeight), false))
 		{
-			if (ImGui::BeginTable("backed_up_files_left_table", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY))
+			if (ImGui::BeginTable("backed_up_files_left_table", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY | ImGuiTableFlags_Sortable))
 			{
 				ImGui::TableSetupColumn("Path", ImGuiTableColumnFlags_WidthStretch, 1.0f);
 				ImGui::TableSetupColumn("Filename", ImGuiTableColumnFlags_WidthStretch, 0.6f);
-				ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 60.0f);
-				ImGui::TableSetupColumn("Latest Backup", ImGuiTableColumnFlags_WidthFixed, 170.0f);
+				ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 60.0f);
+				ImGui::TableSetupColumn("Latest Backup", ImGuiTableColumnFlags_WidthFixed | ImGuiTableColumnFlags_PreferSortDescending, 170.0f);
 				ImGui::TableHeadersRow();
+
+				if (ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs())
+				{
+					if (sortSpecs->SpecsDirty && sortSpecs->SpecsCount > 0)
+					{
+						const ImGuiTableColumnSortSpecs& spec = sortSpecs->Specs[0];
+						g_backupIndex.sort([&](const BackupFile& left, const BackupFile& right)
+						{
+							int compareResult = 0;
+
+							switch (spec.ColumnIndex)
+							{
+							case 0: // Path
+								compareResult = left.originalPath.compare(right.originalPath);
+								break;
+							case 1: // Filename
+								compareResult = std::fs::path(left.originalPath).filename().wstring().compare(
+									std::fs::path(right.originalPath).filename().wstring());
+								break;
+							case 2: // #
+								compareResult = (left.backups.size() < right.backups.size()) ? -1 : (left.backups.size() > right.backups.size() ? 1 : 0);
+								break;
+							case 3: // Latest Backup
+								compareResult = (left.backups.back() < right.backups.back()) ? -1 : (left.backups.back() > right.backups.back() ? 1 : 0);
+								break;
+							default:
+								break;
+							}
+
+							if (spec.SortDirection == ImGuiSortDirection_Descending)
+							{
+								compareResult = -compareResult;
+							}
+
+							if (compareResult == 0)
+							{
+								return left.originalPath < right.originalPath;
+							}
+
+							return compareResult < 0;
+						});
+
+						sortSpecs->SpecsDirty = false;
+					}
+				}
 
 				for (auto entryIt = g_backupIndex.begin(); entryIt != g_backupIndex.end(); ++entryIt)
 				{
