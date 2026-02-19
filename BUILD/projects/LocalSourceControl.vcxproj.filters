@@ -1,12 +1,57 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
+    <Filter Include="fmt">
+      <UniqueIdentifier>{4C73880B-B87C-887C-41F8-9E7CAD00947C}</UniqueIdentifier>
+    </Filter>
     <Filter Include="imgui">
       <UniqueIdentifier>{0098A80F-6CAC-D0C0-352E-7420A101CDF1}</UniqueIdentifier>
     </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="..\..\app.h" />
+    <ClInclude Include="..\..\fmt\args.h">
+      <Filter>fmt</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\fmt\base.h">
+      <Filter>fmt</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\fmt\chrono.h">
+      <Filter>fmt</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\fmt\color.h">
+      <Filter>fmt</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\fmt\compile.h">
+      <Filter>fmt</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\fmt\core.h">
+      <Filter>fmt</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\fmt\format-inl.h">
+      <Filter>fmt</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\fmt\format.h">
+      <Filter>fmt</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\fmt\os.h">
+      <Filter>fmt</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\fmt\ostream.h">
+      <Filter>fmt</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\fmt\printf.h">
+      <Filter>fmt</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\fmt\ranges.h">
+      <Filter>fmt</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\fmt\std.h">
+      <Filter>fmt</Filter>
+    </ClInclude>
+    <ClInclude Include="..\..\fmt\xchar.h">
+      <Filter>fmt</Filter>
+    </ClInclude>
     <ClInclude Include="..\..\imgui\imconfig.h">
       <Filter>imgui</Filter>
     </ClInclude>
@@ -32,9 +77,9 @@
       <Filter>imgui</Filter>
     </ClInclude>
     <ClInclude Include="..\..\main.h" />
+    <ClInclude Include="..\..\resource.h" />
     <ClInclude Include="..\..\settings.h" />
     <ClInclude Include="..\..\util.h" />
-    <ClInclude Include="..\..\resource.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\..\app.cpp" />
@@ -66,12 +111,5 @@
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="..\..\resources.rc" />
-  </ItemGroup>
-  <ItemGroup>
-    <Image Include="LocalSourceControl.ico" />
-    <Image Include="..\..\LocalSourceControl.ico" />
-  </ItemGroup>
-  <ItemGroup>
-    <Font Include="..\..\SpaceMono-Regular.ttf" />
   </ItemGroup>
 </Project>

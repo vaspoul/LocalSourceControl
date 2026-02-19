@@ -1,4 +1,4 @@
-// main.cpp
+﻿﻿﻿﻿// main.cpp
 
 #include "main.h"
 #include "app.h"
@@ -6,12 +6,22 @@
 #include "settings.h"
 #include "imgui/imgui_internal.h"
 
-struct BackupOperation
+using namespace std::chrono;
+
+typedef std::chrono::system_clock::time_point TimePoint;
+
+struct BackupFile
 {
-	std::wstring	timeStamp;
-	std::wstring	originalPath;
-	std::wstring	backupPath;
-	std::wstring	result;
+	std::vector<TimePoint>	backups;
+	std::wstring			originalPath;
+
+	void SortBackupTimes()
+	{
+		std::sort(backups.begin(), backups.end(), [](const TimePoint& left, const TimePoint& right)
+		{
+			return left < right;
+		});
+	}
 };
 
 struct FolderWatcher
@@ -25,12 +35,20 @@ struct FolderWatcher
 	std::unordered_map<std::wstring, uint64_t>	lastEventTickByPath;
 };
 
-static std::mutex											g_operationsMutex;
-static std::vector<BackupOperation>							g_operations;
 static const uint32_t										kOperationHistoryMaxCount = 1024;
 
 static std::shared_mutex									g_indexMutex;
-static std::map<std::wstring, std::vector<std::wstring>>	g_backupIndex;
+static std::list<BackupFile>								g_backupIndex;
+static std::mutex											g_historyMutex;
+
+struct HistoryEntry
+{
+	std::wstring originalPath;
+	std::wstring backupPath;
+	TimePoint timePoint = {};
+};
+
+static std::vector<HistoryEntry>							g_todayHistory;
 
 static std::mutex											g_watchersMutex;
 static std::vector<std::unique_ptr<FolderWatcher>>			g_watchers;
@@ -89,7 +107,32 @@ static std::wstring UnsanitizePathFromBackupLayout(const std::wstring& relativeP
 	return out;
 }
 
-static bool ParseBackupTimestamp(const std::wstring& backupFileName, std::wstring& outDate, std::wstring& outTime)
+static std::wstring FormatTimestampForDisplay(const TimePoint& timePoint)
+{
+	using namespace std::chrono;
+	auto tt = system_clock::to_time_t(timePoint);
+	tm tmv = {};
+	localtime_s(&tmv, &tt);
+
+	static const wchar_t* monthNames[12] =
+	{
+		L"Jan", L"Feb", L"Mar", L"Apr", L"May", L"Jun",
+		L"Jul", L"Aug", L"Sep", L"Oct", L"Nov", L"Dec"
+	};
+
+	const wchar_t* monthName = (tmv.tm_mon >= 0 && tmv.tm_mon < 12) ? monthNames[tmv.tm_mon] : L"???";
+
+	return fmt::format(
+		L"{:02d} {} {:04d} {:02d}:{:02d}:{:02d}",
+		tmv.tm_mday,
+		monthName,
+		tmv.tm_year + 1900,
+		tmv.tm_hour,
+		tmv.tm_min,
+		tmv.tm_sec);
+}
+
+static bool TryParseBackupTimestampToTimePoint(const std::wstring& backupFileName, TimePoint& outTimePoint)
 {
 	size_t markerPos = backupFileName.rfind(L"_backup_");
 	if (markerPos == std::wstring::npos)
@@ -116,127 +159,64 @@ static bool ParseBackupTimestamp(const std::wstring& backupFileName, std::wstrin
 		return false;
 	}
 
-	wchar_t dateBuffer[64] = {};
-	wchar_t timeBuffer[64] = {};
+	tm tmv = {};
+	tmv.tm_year = year - 1900;
+	tmv.tm_mon = month - 1;
+	tmv.tm_mday = day;
+	tmv.tm_hour = hour;
+	tmv.tm_min = minute;
+	tmv.tm_sec = second;
+	tmv.tm_isdst = -1;
 
-	static const wchar_t* monthNames[12] =
+	time_t tt = mktime(&tmv);
+	if (tt == (time_t)-1)
 	{
-		L"Jan", L"Feb", L"Mar", L"Apr", L"May", L"Jun",
-		L"Jul", L"Aug", L"Sep", L"Oct", L"Nov", L"Dec"
-	};
+		return false;
+	}
 
-	swprintf_s(
-		dateBuffer,
-		L"%02d %s %04d",
-		day,
-		monthNames[month - 1],
-		year);
-
-	swprintf_s(
-		timeBuffer,
-		L"%02d:%02d:%02d",
-		hour,
-		minute,
-		second);
-
-	outDate = dateBuffer;
-	outTime = timeBuffer;
-
+	outTimePoint = std::chrono::system_clock::from_time_t(tt);
 	return true;
 }
 
-static std::wstring FormatOperationTimestampForDisplay(const std::wstring& rawTimestamp)
+static std::wstring BuildTodayPrefixFromTimePoint(const TimePoint& timePoint)
 {
-	int year = 0, month = 0, day = 0;
-	int hour = 0, minute = 0, second = 0;
+	using namespace std::chrono;
+	auto tt = system_clock::to_time_t(timePoint);
+	tm tmv = {};
+	localtime_s(&tmv, &tt);
 
-	if (swscanf_s(
-		rawTimestamp.c_str(),
-		L"%4d_%2d_%2d__%2d_%2d_%2d",
-		&year, &month, &day,
-		&hour, &minute, &second) != 6)
-	{
-		return rawTimestamp;
-	}
-
-	if (month < 1 || month > 12)
-	{
-		return rawTimestamp;
-	}
-
-	static const wchar_t* monthNames[12] =
-	{
-		L"Jan", L"Feb", L"Mar", L"Apr", L"May", L"Jun",
-		L"Jul", L"Aug", L"Sep", L"Oct", L"Nov", L"Dec"
-	};
-
-	wchar_t buffer[64] = {};
-	swprintf_s(
-		buffer,
-		L"%02d %s %04d %02d:%02d:%02d",
-		day,
-		monthNames[month - 1],
-		year,
-		hour,
-		minute,
-		second);
-
-	return buffer;
+	return fmt::format(
+		L"_backup_{:04d}_{:02d}_{:02d}__",
+		tmv.tm_year + 1900,
+		tmv.tm_mon + 1,
+		tmv.tm_mday);
 }
 
-static void PushOperation(const BackupOperation& backupOperation)
+static std::wstring MakeBackupPathFromTimePoint(const std::wstring& backupRoot, const std::wstring& originalFullPath, const TimePoint& timePoint)
 {
-	std::lock_guard<std::mutex> lock(g_operationsMutex);
+	std::fs::path originalPath(originalFullPath);
+	std::fs::path originalDir = originalPath.parent_path();
+	std::fs::path originalStem = originalPath.stem();
+	std::fs::path originalExt = originalPath.extension();
 
-	g_operations.push_back(backupOperation);
+	std::wstring sanitizedDir = SanitizePathForBackup(originalDir.wstring());
+	std::fs::path destinationDir = std::fs::path(backupRoot) / std::fs::path(sanitizedDir);
 
-	if (g_operations.size() > kOperationHistoryMaxCount)
-	{
-		g_operations.erase(g_operations.begin(), g_operations.begin() + (g_operations.size() - kOperationHistoryMaxCount));
-	}
+	auto tt = system_clock::to_time_t(timePoint);
+	tm tmv = {};
+	localtime_s(&tmv, &tt);
 
-	if (backupOperation.result == L"OK")
-	{
-		using namespace std::chrono;
-		auto now = system_clock::now();
-		auto tt = system_clock::to_time_t(now);
-		tm tmv = {};
-		localtime_s(&tmv, &tt);
+	std::wstring timestamp = fmt::format(	L"{:04d}_{:02d}_{:02d}__{:02d}_{:02d}_{:02d}",
+											tmv.tm_year + 1900,
+											tmv.tm_mon + 1,
+											tmv.tm_mday,
+											tmv.tm_hour,
+											tmv.tm_min,
+											tmv.tm_sec);
 
-		wchar_t todayPrefix[64] = {};
-		swprintf_s(todayPrefix, L"_backup_%04d_%02d_%02d__", tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday);
-		if (g_todayPrefix != todayPrefix)
-		{
-			g_todayPrefix = todayPrefix;
-			g_backupsToday = 0;
-		}
+	std::wstring destinationFileName = originalStem.wstring() + L"_backup_" + timestamp + originalExt.wstring();
 
-		if (backupOperation.backupPath.find(g_todayPrefix) != std::wstring::npos)
-		{
-			++g_backupsToday;
-
-			TrayUpdateBackupCount(g_backupsToday);
-		}
-	}
-}
-
-static uint64_t FileTimeToU64(const FILETIME& fileTime)
-{
-	ULARGE_INTEGER fileTime64 = {};
-	fileTime64.LowPart = fileTime.dwLowDateTime;
-	fileTime64.HighPart = fileTime.dwHighDateTime;
-	return fileTime64.QuadPart;
-}
-
-static std::optional<uint64_t> TryGetFileWriteTimeU64(const std::wstring& filePath)
-{
-	WIN32_FILE_ATTRIBUTE_DATA fileAttributeData = {};
-	if (!GetFileAttributesExW(filePath.c_str(), GetFileExInfoStandard, &fileAttributeData))
-	{
-		return std::nullopt;
-	}
-
-	return FileTimeToU64(fileAttributeData.ftLastWriteTime);
+	return (destinationDir / destinationFileName).wstring();
 }
 
 static std::wstring NormalizePathSlashes(std::wstring value)
@@ -250,6 +230,100 @@ static std::wstring NormalizePathSlashes(std::wstring value)
 	}
 
 	return value;
+}
+
+static void RemoveFromTodayHistory(const std::wstring& originalPath, const TimePoint& timePoint)
+{
+	std::lock_guard<std::mutex> lock(g_historyMutex);
+
+	g_todayHistory.erase(
+		std::remove_if(g_todayHistory.begin(), g_todayHistory.end(), [&](const HistoryEntry& entry)
+		{
+			return entry.originalPath == originalPath && entry.timePoint == timePoint;
+		}),
+		g_todayHistory.end());
+}
+
+static void InsertTodayHistory(const std::wstring& originalPath, const TimePoint& timePoint)
+{
+	HistoryEntry item = {};
+	item.originalPath = originalPath;
+	item.timePoint = timePoint;
+	item.backupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, originalPath, timePoint);
+
+	std::lock_guard<std::mutex> lock(g_historyMutex);
+
+	auto insertIt = std::lower_bound(g_todayHistory.begin(), g_todayHistory.end(), timePoint,
+		[](const HistoryEntry& entry, const TimePoint& value)
+		{
+			return entry.timePoint > value;
+		});
+
+	g_todayHistory.insert(insertIt, std::move(item));
+
+	if (g_todayHistory.size() > kOperationHistoryMaxCount)
+	{
+		g_todayHistory.resize(kOperationHistoryMaxCount);
+	}
+}
+
+static void RebuildTodayHistory()
+{
+	std::vector<HistoryEntry> rebuilt;
+
+	{
+		std::shared_lock<std::shared_mutex> lock(g_indexMutex);
+
+		for (const BackupFile& entry : g_backupIndex)
+		{
+			for (const TimePoint& timePoint : entry.backups)
+			{
+				if (BuildTodayPrefixFromTimePoint(timePoint) != g_todayPrefix)
+				{
+					continue;
+				}
+
+				HistoryEntry item = {};
+				item.originalPath = entry.originalPath;
+				item.timePoint = timePoint;
+				item.backupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, entry.originalPath, timePoint);
+				rebuilt.push_back(std::move(item));
+			}
+		}
+	}
+
+	std::sort(rebuilt.begin(), rebuilt.end(), [](const HistoryEntry& left, const HistoryEntry& right)
+	{
+		return left.timePoint > right.timePoint;
+	});
+
+	if (rebuilt.size() > kOperationHistoryMaxCount)
+	{
+		rebuilt.resize(kOperationHistoryMaxCount);
+	}
+
+	{
+		std::lock_guard<std::mutex> lock(g_historyMutex);
+		g_todayHistory = std::move(rebuilt);
+	}
+}
+
+static BackupFile& GetOrCreateBackupEntry_Locked(const std::wstring& originalPath)
+{
+	auto itr = g_backupIndex.end();
+
+	for (itr = g_backupIndex.begin(); itr != g_backupIndex.end(); ++itr)
+	{
+		if (itr->originalPath == originalPath)
+		{
+			return *itr;
+		}
+	}
+
+	BackupFile entry = {};
+	entry.originalPath = originalPath;
+	g_backupIndex.push_back(std::move(entry));
+	return g_backupIndex.back();
 }
 
 static bool FilterMatchToken(
@@ -403,15 +477,32 @@ static uint64_t ComputeFolderSizeBytes(const std::fs::path& rootPath)
 	return totalBytes;
 }
 
-static void EnforcePerFileLimit_Locked(std::vector<std::wstring>& backupPaths, uint32_t maxBackupsPerFile)
+static void EnforcePerFileLimit_Locked(BackupFile& entry, uint32_t maxBackupsPerFile)
 {
-	while (backupPaths.size() > maxBackupsPerFile)
+	if (maxBackupsPerFile == 0)
 	{
-		std::wstring oldestBackupPath = backupPaths.front();
-		backupPaths.erase(backupPaths.begin());
+		return;
+	}
 
+	entry.SortBackupTimes();
+
+	size_t validCount = entry.backups.size();
+	while (validCount > maxBackupsPerFile)
+	{
+		auto oldestIt = entry.backups.begin();
+		if (oldestIt == entry.backups.end())
+		{
+			break;
+		}
+
+		TimePoint oldestTimePoint = *oldestIt;
+		entry.backups.erase(oldestIt);
+		--validCount;
+
+		std::wstring oldestBackupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, entry.originalPath, oldestTimePoint);
 		std::error_code removeError;
 		std::fs::remove(std::fs::path(oldestBackupPath), removeError);
+		RemoveFromTodayHistory(entry.originalPath, oldestTimePoint);
 	}
 }
 
@@ -438,29 +529,26 @@ static void EnforceGlobalSizeLimit(const std::fs::path& backupRootPath, uint32_t
 	struct GlobalBackupItem
 	{
 		std::wstring originalPath;
-		std::wstring backupPath;
+		TimePoint timePoint;
 	};
 
 	std::vector<GlobalBackupItem> allBackups;
 
 	{
-		std::shared_lock<std::shared_mutex> lock(g_indexMutex);
+		std::shared_lock<std::shared_mutex> indexLock(g_indexMutex);
 
-		for (const auto& kv : g_backupIndex)
+		for (const BackupFile& entry : g_backupIndex)
 		{
-			const std::wstring& originalPath = kv.first;
-			const std::vector<std::wstring>& backupPaths = kv.second;
-
-			for (const std::wstring& backupPath : backupPaths)
+			for (const TimePoint& timePoint : entry.backups)
 			{
-				allBackups.push_back(GlobalBackupItem{ originalPath, backupPath });
+				allBackups.push_back(GlobalBackupItem{ entry.originalPath, timePoint });
 			}
 		}
 	}
 
 	std::sort(allBackups.begin(), allBackups.end(), [](const GlobalBackupItem& left, const GlobalBackupItem& right)
 	{
-		return left.backupPath < right.backupPath;
+		return left.timePoint < right.timePoint;
 	});
 
 
@@ -471,24 +559,36 @@ static void EnforceGlobalSizeLimit(const std::fs::path& backupRootPath, uint32_t
 		std::error_code errorCode;
 		uint64_t removedFileSize = 0;
 
-		if (std::fs::exists(allBackups[globalIndex].backupPath, errorCode))
+		const std::wstring& originalPath = allBackups[globalIndex].originalPath;
+		const TimePoint& timePoint = allBackups[globalIndex].timePoint;
+		std::wstring backupPath = MakeBackupPathFromTimePoint(backupRootPath.wstring(), originalPath, timePoint);
+
+		if (std::fs::exists(backupPath, errorCode))
 		{
-			removedFileSize = (uint64_t)std::fs::file_size(allBackups[globalIndex].backupPath, errorCode);
+			removedFileSize = (uint64_t)std::fs::file_size(backupPath, errorCode);
 		}
 
-		std::fs::remove(allBackups[globalIndex].backupPath, errorCode);
+		std::fs::remove(backupPath, errorCode);
 
 		{
-			std::unique_lock<std::shared_mutex> lock(g_indexMutex);
-
-			auto foundItem = g_backupIndex.find(allBackups[globalIndex].originalPath);
-			if (foundItem != g_backupIndex.end())
+			std::unique_lock<std::shared_mutex> indexLock(g_indexMutex);
+			auto entryItr = g_backupIndex.end();
+			for (entryItr = g_backupIndex.begin(); entryItr != g_backupIndex.end(); ++entryItr)
 			{
-				auto& backupPaths = foundItem->second;
-
-				backupPaths.erase( std::remove( backupPaths.begin(), backupPaths.end(), allBackups[globalIndex].backupPath), backupPaths.end() );
+				if (entryItr->originalPath == originalPath)
+				{
+					break;
+				}
+			}
+			if (entryItr != g_backupIndex.end())
+			{
+				auto& backups = entryItr->backups;
+				backups.erase(
+					std::remove(backups.begin(), backups.end(), timePoint),
+					backups.end());
 			}
 		}
+		RemoveFromTodayHistory(originalPath, timePoint);
 
 		if (removedFileSize > 0 && currentBytes >= removedFileSize)
 		{
@@ -499,21 +599,6 @@ static void EnforceGlobalSizeLimit(const std::fs::path& backupRootPath, uint32_t
 	}
 }
 
-static std::wstring MakeBackupPath(const std::wstring& backupRoot, const std::wstring& originalFullPath)
-{
-	std::fs::path originalPath(originalFullPath);
-	std::fs::path originalDir = originalPath.parent_path();
-	std::fs::path originalStem = originalPath.stem();
-	std::fs::path originalExt = originalPath.extension();
-
-	std::wstring sanitizedDir = SanitizePathForBackup(originalDir.wstring());
-	std::fs::path destinationDir = std::fs::path(backupRoot) / std::fs::path(sanitizedDir);
-
-	std::wstring timestamp = MakeTimestampStr();
-	std::wstring destinationFileName = originalStem.wstring() + L"_backup_" + timestamp + originalExt.wstring();
-
-	return (destinationDir / destinationFileName).wstring();
-}
 
 static bool CopyToBackupAndIndex(const WatchedFolder& watchedFolder, const std::wstring& filePath)
 {
@@ -521,11 +606,6 @@ static bool CopyToBackupAndIndex(const WatchedFolder& watchedFolder, const std::
 
 	if (g_settings.backupRoot.empty())
 	{
-		BackupOperation backupOperation = {};
-		backupOperation.timeStamp = MakeTimestampStr();
-		backupOperation.originalPath = filePath;
-		backupOperation.result = L"Skipped (backup folder not set)";
-		PushOperation(backupOperation);
 		return false;
 	}
 
@@ -535,50 +615,30 @@ static bool CopyToBackupAndIndex(const WatchedFolder& watchedFolder, const std::
 		return false;
 	}
 
-	std::wstring destinationPath = MakeBackupPath(g_settings.backupRoot, filePath);
+	TimePoint backupTimePoint = std::chrono::system_clock::now();
+	std::wstring destinationPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, filePath, backupTimePoint);
 	EnsureDirExists(std::fs::path(destinationPath).parent_path());
 
 	BOOL copySucceeded = CopyFileW(filePath.c_str(), destinationPath.c_str(), FALSE);
 	if (!copySucceeded)
 	{
-		DWORD win32Error = GetLastError();
-
-		BackupOperation backupOperation = {};
-		backupOperation.timeStamp = MakeTimestampStr();
-		backupOperation.originalPath = filePath;
-		backupOperation.backupPath = destinationPath;
-		backupOperation.result = L"Copy failed (Win32 error " + std::to_wstring(win32Error) + L")";
-		PushOperation(backupOperation);
 		return false;
-	}
-
-	uint64_t destinationWriteTime = 0;
-	if (auto destinationWriteTimeOpt = TryGetFileWriteTimeU64(destinationPath); destinationWriteTimeOpt.has_value())
-	{
-		destinationWriteTime = destinationWriteTimeOpt.value();
 	}
 
 	{
 		std::unique_lock<std::shared_mutex> lock(g_indexMutex);
 
-		std::vector<std::wstring>& backupPaths = g_backupIndex[filePath];
-		backupPaths.push_back(destinationPath);
-
-		std::sort(backupPaths.begin(), backupPaths.end(), [](const std::wstring& leftPath, const std::wstring& rightPath)
-		{
-			return leftPath < rightPath;
-		});
-
-		EnforcePerFileLimit_Locked(backupPaths, g_settings.maxBackupsPerFile);
+		BackupFile& entry = GetOrCreateBackupEntry_Locked(filePath);
+		entry.backups.push_back(backupTimePoint);
+		entry.SortBackupTimes();
+		EnforcePerFileLimit_Locked(entry, g_settings.maxBackupsPerFile);
 	}
 
+	if (destinationPath.find(g_todayPrefix) != std::wstring::npos)
 	{
-		BackupOperation backupOperation = {};
-		backupOperation.timeStamp = MakeTimestampStr();
-		backupOperation.originalPath = filePath;
-		backupOperation.backupPath = destinationPath;
-		backupOperation.result = L"OK";
-		PushOperation(backupOperation);
+		InsertTodayHistory(filePath, backupTimePoint);
+		++g_backupsToday;
+		TrayUpdateBackupCount(g_backupsToday);
 	}
 
 	EnforceGlobalSizeLimit(std::fs::path(g_settings.backupRoot), g_settings.maxBackupSizeMB);
@@ -649,29 +709,31 @@ static void ScanBackupFolder()
 		
 		std::wstring originalFullPath = UnsanitizePathFromBackupLayout(originalRelativePath.wstring());
 
+		TimePoint timePoint;
+		if (!TryParseBackupTimestampToTimePoint(backupStem, timePoint))
+		{
+			continue;
+		}
+
 		{
 			std::unique_lock<std::shared_mutex> lock(g_indexMutex);
-			g_backupIndex[originalFullPath].push_back(backupFilePath.wstring());
+			BackupFile& entry = GetOrCreateBackupEntry_Locked(originalFullPath);
+			entry.backups.push_back(timePoint);
 		}
 	}
 
 	{
 		std::unique_lock<std::shared_mutex> lock(g_indexMutex);
 
-		for (auto& kv : g_backupIndex)
+		for (BackupFile& entry : g_backupIndex)
 		{
-			std::vector<std::wstring>& backupPaths = kv.second;
-
-			std::sort(backupPaths.begin(), backupPaths.end(), [](const std::wstring& leftPath, const std::wstring& rightPath)
-			{
-				return leftPath < rightPath;
-			});
-
-			EnforcePerFileLimit_Locked(backupPaths, g_settings.maxBackupsPerFile);
+			entry.SortBackupTimes();
+			EnforcePerFileLimit_Locked(entry, g_settings.maxBackupsPerFile);
 		}
 	}
 
 	EnforceGlobalSizeLimit(std::fs::path(g_settings.backupRoot), g_settings.maxBackupSizeMB);
+	RebuildTodayHistory();
 
 	TrayUpdateBackupCount(g_backupsToday);
 }
@@ -709,11 +771,6 @@ static void WatchThreadProc(FolderWatcher* watcher)
 
 	if (watcher->directoryHandle == INVALID_HANDLE_VALUE)
 	{
-		BackupOperation backupOperation = {};
-		backupOperation.timeStamp = MakeTimestampStr();
-		backupOperation.originalPath = watchedFolder.path;
-		backupOperation.result = L"Watcher failed to open folder";
-		PushOperation(backupOperation);
 		return;
 	}
 
@@ -739,13 +796,6 @@ static void WatchThreadProc(FolderWatcher* watcher)
 		{
 			if (!watcher->stopRequested.load())
 			{
-				DWORD win32Error = GetLastError();
-
-				BackupOperation backupOperation = {};
-				backupOperation.timeStamp = MakeTimestampStr();
-				backupOperation.originalPath = watchedFolder.path;
-				backupOperation.result = L"ReadDirectoryChangesW failed (Win32 error " + std::to_wstring(win32Error) + L")";
-				PushOperation(backupOperation);
 			}
 
 			break;
@@ -833,23 +883,11 @@ void LaunchDiffTool(const std::wstring& diffToolPath, const std::wstring& backup
 {
 	if (diffToolPath.empty())
 	{
-		BackupOperation backupOperation = {};
-		backupOperation.timeStamp = MakeTimestampStr();
-		backupOperation.originalPath = originalFilePath;
-		backupOperation.backupPath = backupFilePath;
-		backupOperation.result = L"Diff tool not set";
-		PushOperation(backupOperation);
 		return;
 	}
 
 	if (!FileExists(diffToolPath))
 	{
-		BackupOperation backupOperation = {};
-		backupOperation.timeStamp = MakeTimestampStr();
-		backupOperation.originalPath = originalFilePath;
-		backupOperation.backupPath = backupFilePath;
-		backupOperation.result = L"Diff tool path does not exist";
-		PushOperation(backupOperation);
 		return;
 	}
 
@@ -871,12 +909,7 @@ void LaunchDiffTool(const std::wstring& diffToolPath, const std::wstring& backup
 
 	if ((INT_PTR)resultHandle <= 32)
 	{
-		BackupOperation backupOperation = {};
-		backupOperation.timeStamp = MakeTimestampStr();
-		backupOperation.originalPath = originalFilePath;
-		backupOperation.backupPath = backupFilePath;
-		backupOperation.result = L"Failed to launch diff tool";
-		PushOperation(backupOperation);
+		return;
 	}
 }
 
@@ -1289,19 +1322,6 @@ static bool HandleRowSelectAndHighlight(int rowIndex, int& selectedRowIndex, flo
 	return false;
 }
 
-static std::wstring BackupTimestampFromBackupPath(const std::wstring& backupPath)
-{
-	std::wstring backupFileName = std::fs::path(backupPath).filename().wstring();
-	std::wstring outDate;
-	std::wstring outTime;
-	if (!ParseBackupTimestamp(backupFileName, outDate, outTime))
-	{
-		return L"-";
-	}
-
-	return outDate + L" " + outTime;
-}
-
 static void UI_BackedUpFiles()
 {
 	ImGui::Dummy(ImVec2(0,4));
@@ -1311,6 +1331,7 @@ static void UI_BackedUpFiles()
 	static std::wstring searchText;
 	static std::wstring selectedOriginalPath;
 	static std::wstring selectedBackupPath;
+	static std::list<BackupFile>::iterator selectedOriginalItr;
 	std::wstring latestBackupPath;
 	static float leftPaneWidth = 520.0f;
 
@@ -1354,40 +1375,10 @@ static void UI_BackedUpFiles()
 	{
 		std::shared_lock<std::shared_mutex> indexLock(g_indexMutex);
 	
-		std::vector<std::wstring> visibleOriginalPaths;
-	
-		visibleOriginalPaths.reserve(g_backupIndex.size());
-
-		for (const auto& indexPair : g_backupIndex)
-		{
-			if (indexPair.second.empty())
-			{
-				continue;
-			}
-
-			if (!ContainsAllKeywords(indexPair.first, searchText))
-			{
-				continue;
-			}
-
-			visibleOriginalPaths.push_back(indexPair.first);
-		}
-
-		if (visibleOriginalPaths.empty())
-		{
-			selectedOriginalPath.clear();
-			selectedBackupPath.clear();
-		}
-		else
-		{
-			bool selectedIsVisible = (std::find(visibleOriginalPaths.begin(), visibleOriginalPaths.end(), selectedOriginalPath) != visibleOriginalPaths.end());
-
-			if (!selectedIsVisible)
-			{
-				selectedOriginalPath = visibleOriginalPaths.front();
-				selectedBackupPath.clear();
-			}
-		}
+		selectedOriginalItr = g_backupIndex.end();
+		bool selectedIsVisible = false;
+		bool hasVisibleEntries = false;
+		std::list<BackupFile>::iterator firstVisibleItr = g_backupIndex.end();
 
 		if (ImGui::BeginChild("backed_up_files_left", ImVec2(leftPaneWidth, paneHeight), false))
 		{
@@ -1399,27 +1390,39 @@ static void UI_BackedUpFiles()
 				ImGui::TableSetupColumn("Latest Backup", ImGuiTableColumnFlags_WidthFixed, 170.0f);
 				ImGui::TableHeadersRow();
 
-				for (const std::wstring& originalPath : visibleOriginalPaths)
+				for (auto entryIt = g_backupIndex.begin(); entryIt != g_backupIndex.end(); ++entryIt)
 				{
-					auto it = g_backupIndex.find(originalPath);
-					if (it == g_backupIndex.end())
-					{
-						continue;
-					}
-					const std::vector<std::wstring>& backupPaths = it->second;
-					if (backupPaths.empty())
+					const BackupFile& entry = *entryIt;
+					if (entry.backups.empty())
 					{
 						continue;
 					}
 
-					std::fs::path originalFsPath(originalPath);
+					if (!ContainsAllKeywords(entry.originalPath, searchText))
+					{
+						continue;
+					}
+
+					if (!hasVisibleEntries)
+					{
+						firstVisibleItr = entryIt;
+						hasVisibleEntries = true;
+					}
+
+					if (entry.originalPath == selectedOriginalPath)
+					{
+						selectedOriginalItr = entryIt;
+						selectedIsVisible = true;
+					}
+
+					std::fs::path originalFsPath(entry.originalPath);
 					std::wstring originalNameWide = originalFsPath.filename().wstring();
 					std::wstring originalFolderWide = originalFsPath.parent_path().wstring();
 					std::string originalNameUtf8 = WToUTF8(originalNameWide);
 					std::string originalFolderUtf8 = WToUTF8(originalFolderWide);
-					std::string originalPathUtf8 = WToUTF8(originalPath);
+					std::string originalPathUtf8 = WToUTF8(entry.originalPath);
 
-					ImGui::PushID(originalPath.data());
+					ImGui::PushID(entry.originalPath.data());
 					ImGui::TableNextRow();
 					float rowMinY = ImGui::GetCursorScreenPos().y;
 
@@ -1450,28 +1453,31 @@ static void UI_BackedUpFiles()
 					}
 					if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 					{
-						selectedOriginalPath = originalPath;
+						selectedOriginalPath = entry.originalPath;
 						selectedBackupPath.clear();
-						OpenFileWithShell(originalPath);
+						selectedOriginalItr = entryIt;
+						OpenFileWithShell(entry.originalPath);
 					}
 					if (ImGui::BeginPopupContextItem("original_context"))
 					{
 						if (ImGui::MenuItem("Show in Explorer"))
 						{
-							selectedOriginalPath = originalPath;
+							selectedOriginalPath = entry.originalPath;
 							selectedBackupPath.clear();
-							OpenExplorerSelectPath(originalPath);
+							selectedOriginalItr = entryIt;
+							OpenExplorerSelectPath(entry.originalPath);
 						}
 						ImGui::EndPopup();
 					}
 
 					ImGui::TableNextColumn();
-					ImGui::Text("%d", (int)backupPaths.size());
+					{
+						ImGui::Text("%d", (int)entry.backups.size());
+					}
 
 					ImGui::TableNextColumn();
 					{
-						const std::wstring& latestBackupForRow = backupPaths.back();
-						std::wstring latestTimestamp = BackupTimestampFromBackupPath(latestBackupForRow);
+						std::wstring latestTimestamp = FormatTimestampForDisplay(entry.backups.back());
 						ImGui::TextUnformatted(WToUTF8(latestTimestamp).c_str());
 					}
 
@@ -1486,11 +1492,12 @@ static void UI_BackedUpFiles()
 						ImVec2 rowMax(windowPos.x + contentMax.x, rowMaxY);
 
 						bool isHovered = ImGui::IsMouseHoveringRect(rowMin, rowMax, false);
-						bool isSelected = (selectedOriginalPath == originalPath);
+						bool isSelected = (selectedOriginalPath == entry.originalPath);
 						if (isHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
 						{
-							selectedOriginalPath = originalPath;
+							selectedOriginalPath = entry.originalPath;
 							selectedBackupPath.clear();
+							selectedOriginalItr = entryIt;
 							isSelected = true;
 						}
 
@@ -1513,6 +1520,19 @@ static void UI_BackedUpFiles()
 			}
 		}
 		ImGui::EndChild();
+
+		if (!hasVisibleEntries)
+		{
+			selectedOriginalPath.clear();
+			selectedBackupPath.clear();
+			selectedOriginalItr = g_backupIndex.end();
+		}
+		else if (!selectedIsVisible)
+		{
+			selectedOriginalItr = firstVisibleItr;
+			selectedOriginalPath = selectedOriginalItr->originalPath;
+			selectedBackupPath.clear();
+		}
 
 		ImGui::SameLine(0.0f, 0.0f);
 		ImGui::InvisibleButton("backed_up_files_splitter", ImVec2(splitterWidth, paneHeight));
@@ -1548,26 +1568,34 @@ static void UI_BackedUpFiles()
 			}
 			else
 			{
-				auto selectedIt = g_backupIndex.find(selectedOriginalPath);
-				if (selectedIt == g_backupIndex.end() || selectedIt->second.empty())
+				if (selectedOriginalItr == g_backupIndex.end())
 				{
 					ImGui::TextDisabled("No backups available for selected file.");
 				}
 				else
 				{
-					const std::vector<std::wstring>& selectedBackups = selectedIt->second;
-					latestBackupPath = selectedBackups.back();
+					const BackupFile& selectedEntry = *selectedOriginalItr;
 
-					if (ImGui::BeginTable("selected_file_backups_table", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY))
+					if (selectedEntry.backups.empty())
 					{
-						ImGui::TableSetupColumn("Date & Time", ImGuiTableColumnFlags_WidthFixed, 190.0f);
-						ImGui::TableSetupColumn("Backup File", ImGuiTableColumnFlags_WidthStretch, 1.0f);
-						ImGui::TableSetupColumn("##Actions", ImGuiTableColumnFlags_WidthFixed, 250.0f);
-						ImGui::TableHeadersRow();
+						ImGui::TextDisabled("No backups available for selected file.");
+					}
 
-						for (int backupIndex = (int)selectedBackups.size() - 1; backupIndex >= 0; --backupIndex)
+					if (!selectedEntry.backups.empty())
+					{
+						latestBackupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, selectedOriginalPath, selectedEntry.backups.back());
+
+						if (ImGui::BeginTable("selected_file_backups_table", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY))
 						{
-							const std::wstring& backupPath = selectedBackups[backupIndex];
+							ImGui::TableSetupColumn("Date & Time", ImGuiTableColumnFlags_WidthFixed, 190.0f);
+							ImGui::TableSetupColumn("Backup File", ImGuiTableColumnFlags_WidthStretch, 1.0f);
+							ImGui::TableSetupColumn("##Actions", ImGuiTableColumnFlags_WidthFixed, 250.0f);
+							ImGui::TableHeadersRow();
+
+							for (int backupIndex = (int)selectedEntry.backups.size() - 1; backupIndex >= 0; --backupIndex)
+							{
+							const TimePoint& backupTimePoint = selectedEntry.backups[backupIndex];
+							std::wstring backupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, selectedOriginalPath, backupTimePoint);
 							std::wstring backupFileName = std::fs::path(backupPath).filename().wstring();
 							std::string backupFileNameUtf8 = WToUTF8(backupFileName);
 
@@ -1578,7 +1606,7 @@ static void UI_BackedUpFiles()
 
 							ImGui::TableNextColumn();
 							{
-								std::wstring timestamp = BackupTimestampFromBackupPath(backupPath);
+								std::wstring timestamp = FormatTimestampForDisplay(backupTimePoint);
 						
 								ImGui::TextUnformatted(WToUTF8(timestamp).c_str());
 
@@ -1612,7 +1640,8 @@ static void UI_BackedUpFiles()
 								}
 								if (ImGui::Button("Diff Previous"))
 								{
-									const std::wstring& previousBackupPath = selectedBackups[backupIndex - 1];
+									const TimePoint& previousTimePoint = selectedEntry.backups[backupIndex - 1];
+									std::wstring previousBackupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, selectedOriginalPath, previousTimePoint);
 									LaunchDiffTool(g_settings.diffToolPath, previousBackupPath, backupPath);
 								}
 								if (!hasPreviousBackup)
@@ -1678,7 +1707,8 @@ static void UI_BackedUpFiles()
 									{
 										if (ImGui::MenuItem("Diff Previous"))
 										{
-											const std::wstring& previousBackupPath = selectedBackups[backupIndex - 1];
+											const TimePoint& previousTimePoint = selectedEntry.backups[backupIndex - 1];
+											std::wstring previousBackupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, selectedOriginalPath, previousTimePoint);
 											LaunchDiffTool(g_settings.diffToolPath, previousBackupPath, backupPath);
 										}
 									}
@@ -1698,9 +1728,10 @@ static void UI_BackedUpFiles()
 							}
 
 							ImGui::PopID();
-						}
+							}
 
-						ImGui::EndTable();
+							ImGui::EndTable();
+						}
 					}
 				}
 			}
@@ -1742,107 +1773,114 @@ static void UI_History()
 	bool isCtrlDown = ImGui::GetIO().KeyCtrl;
 	bool isDiffPressed = isCtrlDown && ImGui::IsKeyPressed(ImGuiKey_D, false);
 
-	BackupOperation selectedOperationCopy = {};
+	HistoryEntry selectedOperationCopy = {};
 	bool hasSelectedOperation = false;
 
-	ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(6.0f, 6.0f));
-
-	if (ImGui::BeginTable("ops", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY))
 	{
-		ImGui::TableSetupColumn("Path");
-		ImGui::TableSetupColumn("Backup Time", ImGuiTableColumnFlags_WidthFixed, 160.0f);
-		ImGui::TableSetupColumn("Backup Path");
-		ImGui::TableSetupColumn("Result", ImGuiTableColumnFlags_WidthFixed, 220.0f);
-		ImGui::TableHeadersRow();
+		std::lock_guard<std::mutex> lock(g_historyMutex);
 
-		std::lock_guard<std::mutex> lock(g_operationsMutex);
-
-		for (int operationIndex = (int)g_operations.size() - 1; operationIndex >= 0; --operationIndex)
+		if (selectedOperationIndex < 0 || selectedOperationIndex >= (int)g_todayHistory.size())
 		{
-			const BackupOperation& backupOperation = g_operations[operationIndex];
-
-			ImGui::PushID(operationIndex);
-
-			ImGui::TableNextRow();
-
-			float rowMinY = ImGui::GetCursorScreenPos().y;
-
-			ImGui::TableNextColumn();
-			{
-				std::string originalUtf8 = WToUTF8(backupOperation.originalPath);
-
-				ImGui::TextClickable("%s", originalUtf8.c_str());
-
-				if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
-				{
-					selectedOperationIndex = operationIndex;
-					if (!backupOperation.originalPath.empty())
-					{
-						OpenFileWithShell(backupOperation.originalPath);
-					}
-				}
-
-				if (ImGui::BeginPopupContextItem("original_context"))
-				{
-					if (ImGui::MenuItem("Show in Explorer"))
-					{
-						selectedOperationIndex = operationIndex;
-						OpenExplorerSelectPath(backupOperation.originalPath);
-					}
-					ImGui::EndPopup();
-				}
-			}
-
-			ImGui::TableNextColumn();
-			std::wstring formattedTimeStamp = FormatOperationTimestampForDisplay(backupOperation.timeStamp);
-			ImGui::TextUnformatted(WToUTF8(formattedTimeStamp).c_str());
-
-			ImGui::TableNextColumn();
-			{
-				std::string backupUtf8 = WToUTF8(backupOperation.backupPath);
-
-				ImGui::TextClickable("%s", backupUtf8.c_str());
-
-				if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
-				{
-					selectedOperationIndex = operationIndex;
-					if (!backupOperation.backupPath.empty())
-					{
-						OpenFileWithShell(backupOperation.backupPath);
-					}
-				}
-
-				if (ImGui::BeginPopupContextItem("backup_context"))
-				{
-					if (ImGui::MenuItem("Show in Explorer"))
-					{
-						selectedOperationIndex = operationIndex;
-						OpenExplorerSelectPath(backupOperation.backupPath);
-					}
-					ImGui::EndPopup();
-				}
-			}
-
-			ImGui::TableNextColumn();
-			ImGui::TextUnformatted(WToUTF8(backupOperation.result).c_str());
-
-			float rowMaxY = ImGui::GetCursorScreenPos().y;
-
-			HandleRowSelectAndHighlight(operationIndex, selectedOperationIndex, rowMinY, rowMaxY);
-
-			if (operationIndex == selectedOperationIndex)
-			{
-				selectedOperationCopy = backupOperation;
-				hasSelectedOperation = true;
-			}
-
-			ImGui::PopID();
+			selectedOperationIndex = -1;
 		}
 
-		ImGui::EndTable();
-	}
+		ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(6.0f, 6.0f));
 
-	ImGui::PopStyleVar();
+		if (ImGui::BeginTable("ops", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY))
+		{
+			ImGui::TableSetupColumn("Path");
+			ImGui::TableSetupColumn("Backup Time", ImGuiTableColumnFlags_WidthFixed, 160.0f);
+			ImGui::TableSetupColumn("Backup Path");
+			ImGui::TableSetupColumn("Result", ImGuiTableColumnFlags_WidthFixed, 220.0f);
+			ImGui::TableHeadersRow();
+
+			for (int operationIndex = 0; operationIndex < (int)g_todayHistory.size(); ++operationIndex)
+			{
+				const HistoryEntry& backupOperation = g_todayHistory[operationIndex];
+
+				ImGui::PushID(operationIndex);
+
+				ImGui::TableNextRow();
+
+				float rowMinY = ImGui::GetCursorScreenPos().y;
+
+				ImGui::TableNextColumn();
+				{
+					std::string originalUtf8 = WToUTF8(backupOperation.originalPath);
+
+					ImGui::TextClickable("%s", originalUtf8.c_str());
+
+					if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+					{
+						selectedOperationIndex = operationIndex;
+						if (!backupOperation.originalPath.empty())
+						{
+							OpenFileWithShell(backupOperation.originalPath);
+						}
+					}
+
+					if (ImGui::BeginPopupContextItem("original_context"))
+					{
+						if (ImGui::MenuItem("Show in Explorer"))
+						{
+							selectedOperationIndex = operationIndex;
+							OpenExplorerSelectPath(backupOperation.originalPath);
+						}
+						ImGui::EndPopup();
+					}
+				}
+
+				ImGui::TableNextColumn();
+				std::wstring formattedTimeStamp = FormatTimestampForDisplay(backupOperation.timePoint);
+				ImGui::TextUnformatted(WToUTF8(formattedTimeStamp).c_str());
+
+				ImGui::TableNextColumn();
+				{
+					std::string backupUtf8 = WToUTF8(backupOperation.backupPath);
+
+					ImGui::TextClickable("%s", backupUtf8.c_str());
+
+					if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+					{
+						selectedOperationIndex = operationIndex;
+						if (!backupOperation.backupPath.empty())
+						{
+							OpenFileWithShell(backupOperation.backupPath);
+						}
+					}
+
+					if (ImGui::BeginPopupContextItem("backup_context"))
+					{
+						if (ImGui::MenuItem("Show in Explorer"))
+						{
+							selectedOperationIndex = operationIndex;
+							OpenExplorerSelectPath(backupOperation.backupPath);
+						}
+						ImGui::EndPopup();
+					}
+				}
+
+				ImGui::TableNextColumn();
+				ImGui::TextUnformatted("OK");
+
+				float rowMaxY = ImGui::GetCursorScreenPos().y;
+
+				HandleRowSelectAndHighlight(operationIndex, selectedOperationIndex, rowMinY, rowMaxY);
+
+				if (operationIndex == selectedOperationIndex)
+				{
+					selectedOperationCopy = backupOperation;
+					hasSelectedOperation = true;
+				}
+
+				ImGui::PopID();
+			}
+
+				ImGui::EndTable();
+		}
+
+		ImGui::PopStyleVar();
+	}
 
 	if (isDiffPressed && hasSelectedOperation)
 	{
@@ -2023,11 +2061,7 @@ void AppInit()
 	auto tt = system_clock::to_time_t(now);
 	tm tmv = {};
 	localtime_s(&tmv, &tt);
-
-	wchar_t todayPrefix[64] = {};
-	swprintf_s(todayPrefix, L"_backup_%04d_%02d_%02d__", tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday);
-
-	g_todayPrefix = todayPrefix;
+	g_todayPrefix = BuildTodayPrefixFromTimePoint(now);
 
 	ScanBackupFolder();
 	StartWatchersFromSettings();
@@ -2046,9 +2080,7 @@ bool AppLoop()
 		tm tmv = {};
 		localtime_s(&tmv, &tt);
 
-		wchar_t todayPrefix[64] = {};
-		swprintf_s(todayPrefix, L"_backup_%04d_%02d_%02d__", tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday);
-
+		std::wstring todayPrefix = BuildTodayPrefixFromTimePoint(now);
 		if (g_todayPrefix != todayPrefix)
 		{
 			g_todayPrefix = todayPrefix;

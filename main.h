@@ -19,6 +19,8 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <list>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
@@ -29,6 +31,11 @@
 #include <unordered_set>
 #include <vector>
 #include <algorithm>
+
+#define FMT_HEADER_ONLY
+#define FMT_UNICODE 1
+#include "fmt/format.h"
+#include "fmt/xchar.h"
 
 namespace std
 {

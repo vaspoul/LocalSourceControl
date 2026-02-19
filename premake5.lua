@@ -62,6 +62,7 @@ project("LocalSourceControl")
 	characterset("Unicode")
 	pchheader "main.h"
 	pchsource "pch.cpp"
+	buildoptions { "/utf-8" }
 
 	debugdir(".")
 

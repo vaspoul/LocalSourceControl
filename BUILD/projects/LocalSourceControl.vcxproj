@@ -69,6 +69,7 @@
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <ExceptionHandling>false</ExceptionHandling>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <ExternalWarningLevel>Level3</ExternalWarningLevel>
     </ClCompile>
@@ -99,6 +100,7 @@
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <ExceptionHandling>false</ExceptionHandling>
       <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <ExternalWarningLevel>Level3</ExternalWarningLevel>
     </ClCompile>
@@ -115,6 +117,20 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="..\..\app.h" />
+    <ClInclude Include="..\..\fmt\args.h" />
+    <ClInclude Include="..\..\fmt\base.h" />
+    <ClInclude Include="..\..\fmt\chrono.h" />
+    <ClInclude Include="..\..\fmt\color.h" />
+    <ClInclude Include="..\..\fmt\compile.h" />
+    <ClInclude Include="..\..\fmt\core.h" />
+    <ClInclude Include="..\..\fmt\format-inl.h" />
+    <ClInclude Include="..\..\fmt\format.h" />
+    <ClInclude Include="..\..\fmt\os.h" />
+    <ClInclude Include="..\..\fmt\ostream.h" />
+    <ClInclude Include="..\..\fmt\printf.h" />
+    <ClInclude Include="..\..\fmt\ranges.h" />
+    <ClInclude Include="..\..\fmt\std.h" />
+    <ClInclude Include="..\..\fmt\xchar.h" />
     <ClInclude Include="..\..\imgui\imconfig.h" />
     <ClInclude Include="..\..\imgui\imgui.h" />
     <ClInclude Include="..\..\imgui\imgui_impl_dx11.h" />
@@ -146,13 +162,6 @@
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="..\..\resources.rc" />
-  </ItemGroup>
-  <ItemGroup>
-    <Image Include="..\..\LocalSourceControl.ico" />
-    <Image Include="LocalSourceControl.ico" />
-  </ItemGroup>
-  <ItemGroup>
-    <Font Include="..\..\SpaceMono-Regular.ttf" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
