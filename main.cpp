@@ -1350,6 +1350,8 @@ static void UI_BackedUpFiles()
 	static int lastClickIndex = -1;
 	static int rangeSelectMinIndex = -1;
 	static int rangeSelectMaxIndex = -1;
+	static int lastSortColumn = -1;
+	static ImGuiSortDirection lastSortDirection = ImGuiSortDirection_Ascending;
 		
 	static size_t pendingDeleteBackupCount = 0;
 
@@ -1357,7 +1359,7 @@ static void UI_BackedUpFiles()
 	std::list<BackupFile>::iterator currentSelectionItr = g_backupIndex.end();
 	std::wstring latestBackupPath;
 
-	static float leftPaneWidth = 520.0f;
+	static float leftPaneWidth = ImGui::GetContentRegionAvail().x * 0.5f;
 
 	ImGui::TextUnformatted("Filter:");
 	ImGui::SameLine();
@@ -1407,6 +1409,45 @@ static void UI_BackedUpFiles()
 
 	ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(6.0f, 6.0f));
 
+	auto SortBackupIndex_Locked = [&](int column, ImGuiSortDirection direction)
+	{
+		g_backupIndex.sort([&](const BackupFile& left, const BackupFile& right)
+		{
+			int compareResult = 0;
+
+			switch (column)
+			{
+			case 0: // Path
+				compareResult = left.originalPath.compare(right.originalPath);
+				break;
+			case 1: // Filename
+				compareResult = std::fs::path(left.originalPath).filename().wstring().compare(
+					std::fs::path(right.originalPath).filename().wstring());
+				break;
+			case 2: // #
+				compareResult = (left.backups.size() < right.backups.size()) ? -1 : (left.backups.size() > right.backups.size() ? 1 : 0);
+				break;
+			case 3: // Latest Backup
+				compareResult = (left.backups.back() < right.backups.back()) ? -1 : (left.backups.back() > right.backups.back() ? 1 : 0);
+				break;
+			default:
+				break;
+			}
+
+			if (direction == ImGuiSortDirection_Descending)
+			{
+				compareResult = -compareResult;
+			}
+
+			if (compareResult == 0)
+			{
+				return left.originalPath < right.originalPath;
+			}
+
+			return compareResult < 0;
+		});
+	};
+
 	{
 		std::shared_lock<std::shared_mutex> indexLock(g_indexMutex);
 	
@@ -1426,46 +1467,17 @@ static void UI_BackedUpFiles()
 
 				if (ImGuiTableSortSpecs* sortSpecs = ImGui::TableGetSortSpecs())
 				{
-					if (sortSpecs->SpecsDirty && sortSpecs->SpecsCount > 0)
+					if (sortSpecs->SpecsCount > 0)
 					{
 						const ImGuiTableColumnSortSpecs& spec = sortSpecs->Specs[0];
-						g_backupIndex.sort([&](const BackupFile& left, const BackupFile& right)
+						lastSortColumn = spec.ColumnIndex;
+						lastSortDirection = spec.SortDirection;
+
+						if (sortSpecs->SpecsDirty)
 						{
-							int compareResult = 0;
-
-							switch (spec.ColumnIndex)
-							{
-							case 0: // Path
-								compareResult = left.originalPath.compare(right.originalPath);
-								break;
-							case 1: // Filename
-								compareResult = std::fs::path(left.originalPath).filename().wstring().compare(
-									std::fs::path(right.originalPath).filename().wstring());
-								break;
-							case 2: // #
-								compareResult = (left.backups.size() < right.backups.size()) ? -1 : (left.backups.size() > right.backups.size() ? 1 : 0);
-								break;
-							case 3: // Latest Backup
-								compareResult = (left.backups.back() < right.backups.back()) ? -1 : (left.backups.back() > right.backups.back() ? 1 : 0);
-								break;
-							default:
-								break;
-							}
-
-							if (spec.SortDirection == ImGuiSortDirection_Descending)
-							{
-								compareResult = -compareResult;
-							}
-
-							if (compareResult == 0)
-							{
-								return left.originalPath < right.originalPath;
-							}
-
-							return compareResult < 0;
-						});
-
-						sortSpecs->SpecsDirty = false;
+							SortBackupIndex_Locked(lastSortColumn, lastSortDirection);
+							sortSpecs->SpecsDirty = false;
+						}
 					}
 				}
 
@@ -1888,6 +1900,12 @@ static void UI_BackedUpFiles()
 	if (refreshRequested)
 	{
 		ScanBackupFolder();
+
+		if (lastSortColumn >= 0)
+		{
+			std::unique_lock<std::shared_mutex> sortLock(g_indexMutex);
+			SortBackupIndex_Locked(lastSortColumn, lastSortDirection);
+		}
 	}
 
 	if (deleteRequested)
