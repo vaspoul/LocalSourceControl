@@ -219,6 +219,21 @@ static std::wstring MakeBackupPathFromTimePoint(const std::wstring& backupRoot, 
 	return (destinationDir / destinationFileName).wstring();
 }
 
+static std::wstring MakeBackupWildcardPath(const std::wstring& backupRoot, const std::wstring& originalFullPath)
+{
+	std::fs::path originalPath(originalFullPath);
+	std::fs::path originalDir = originalPath.parent_path();
+	std::fs::path originalStem = originalPath.stem();
+	std::fs::path originalExt = originalPath.extension();
+
+	std::wstring sanitizedDir = SanitizePathForBackup(originalDir.wstring());
+	std::fs::path destinationDir = std::fs::path(backupRoot) / std::fs::path(sanitizedDir);
+
+	std::wstring destinationFileName = originalStem.wstring() + L"_backup_*" + originalExt.wstring();
+
+	return (destinationDir / destinationFileName).wstring();
+}
+
 static std::wstring NormalizePathSlashes(std::wstring value)
 {
 	for (wchar_t& currentChar : value)
@@ -1335,7 +1350,10 @@ static void UI_BackedUpFiles()
 	static int lastClickIndex = -1;
 	static int rangeSelectMinIndex = -1;
 	static int rangeSelectMaxIndex = -1;
-	
+		
+	static size_t pendingDeleteBackupCount = 0;
+
+
 	std::list<BackupFile>::iterator currentSelectionItr = g_backupIndex.end();
 	std::wstring latestBackupPath;
 
@@ -1356,6 +1374,16 @@ static void UI_BackedUpFiles()
 	bool isShiftDown = ImGui::GetIO().KeyShift;
 	bool isDiffPressed = isCtrlDown && ImGui::IsKeyPressed(ImGuiKey_D, false);
 	bool refreshRequested = ImGui::IsKeyPressed(ImGuiKey_F5, false);
+	bool deleteRequested = ImGui::IsKeyPressed(ImGuiKey_Delete, false);
+	bool deleteModalOpen = ImGui::IsPopupOpen("Delete Backups");
+	if (deleteModalOpen)
+	{
+		isCtrlDown = false;
+		isShiftDown = false;
+		isDiffPressed = false;
+		refreshRequested = false;
+		deleteRequested = false;
+	}
 
 	const float splitterWidth = 6.0f;
 	const float minLeftPaneWidth = 340.0f;
@@ -1496,11 +1524,11 @@ static void UI_BackedUpFiles()
 					{
 						ImGui::SetTooltip("%s", originalFolderUtf8.c_str());
 					}
-					if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+					if (!deleteModalOpen && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 					{
 						OpenExplorerSelectPath(originalFolderWide);
 					}
-					if (ImGui::BeginPopupContextItem("folder_context"))
+					if (!deleteModalOpen && ImGui::BeginPopupContextItem("folder_context"))
 					{
 						if (ImGui::MenuItem("Show in Explorer"))
 						{
@@ -1516,7 +1544,7 @@ static void UI_BackedUpFiles()
 						ImGui::SetTooltip("%s", originalPathUtf8.c_str());
 					}
 
-					if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+					if (!deleteModalOpen && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 					{
 						selectedOriginalPaths.clear();
 						selectedOriginalPaths.insert(entry.originalPath);
@@ -1525,7 +1553,7 @@ static void UI_BackedUpFiles()
 						selectedIsVisible = true;
 						OpenFileWithShell(entry.originalPath);
 					}
-					if (ImGui::BeginPopupContextItem("original_context"))
+					if (!deleteModalOpen && ImGui::BeginPopupContextItem("original_context"))
 					{
 						if (ImGui::MenuItem("Show in Explorer"))
 						{
@@ -1560,9 +1588,9 @@ static void UI_BackedUpFiles()
 						ImVec2 rowMin(windowPos.x + contentMin.x, rowMinY);
 						ImVec2 rowMax(windowPos.x + contentMax.x, rowMaxY);
 
-						bool isHovered = ImGui::IsMouseHoveringRect(rowMin, rowMax, false);
+						bool isHovered = !deleteModalOpen && ImGui::IsMouseHoveringRect(rowMin, rowMax, false);
 						bool isSelected = (selectedOriginalPaths.count(entry.originalPath));
-						if (isHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+						if (!deleteModalOpen && isHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
 						{
 							if (isCtrlDown)
 							{
@@ -1860,6 +1888,93 @@ static void UI_BackedUpFiles()
 	if (refreshRequested)
 	{
 		ScanBackupFolder();
+	}
+
+	if (deleteRequested)
+	{
+		pendingDeleteBackupCount = 0;
+
+		if (!selectedOriginalPaths.empty())
+		{
+			for (auto entryItr = g_backupIndex.begin(); entryItr != g_backupIndex.end(); ++entryItr)
+			{
+				if (selectedOriginalPaths.count(entryItr->originalPath))
+				{
+					pendingDeleteBackupCount += (*entryItr).backups.size(); 
+				}
+			}
+
+			if (pendingDeleteBackupCount > 0)
+			{
+				ImGui::OpenPopup("Delete Backups");
+			}
+		}
+	}
+
+	if (ImGui::BeginPopupModal("Delete Backups", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		if (ImGui::IsKeyPressed(ImGuiKey_Escape, false))
+		{
+			pendingDeleteBackupCount = 0;
+			ImGui::CloseCurrentPopup();
+		}
+
+		ImGui::Text("Delete %zu backup files for %zu originals?", pendingDeleteBackupCount, selectedOriginalPaths.size());
+		ImGui::Separator();
+
+		if (ImGui::BeginChild("delete_list", ImVec2(720.0f, 220.0f), true))
+		{
+			for (const auto& path : selectedOriginalPaths)
+			{
+				std::wstring wildcardPath = MakeBackupWildcardPath(g_settings.backupRoot, path);
+
+				ImGui::TextUnformatted(WToUTF8(wildcardPath).c_str());
+			}
+		}
+		ImGui::EndChild();
+
+		if (ImGui::Button("Delete", ImVec2(120, 0)))
+		{
+			std::unique_lock<std::shared_mutex> indexLock(g_indexMutex);
+
+			for (auto entryItr = g_backupIndex.begin(); entryItr != g_backupIndex.end(); )
+			{
+				if (selectedOriginalPaths.count(entryItr->originalPath))
+				{
+					for (const TimePoint& timePoint : entryItr->backups)
+					{
+						std::wstring backupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, (*entryItr).originalPath, timePoint);
+						std::error_code errorCode;
+						std::fs::remove(backupPath, errorCode);
+						RemoveFromTodayHistory((*entryItr).originalPath, timePoint);
+					}
+
+					entryItr = g_backupIndex.erase(entryItr);
+				}
+				else
+				{
+					++entryItr;
+				}
+			}
+
+			pendingDeleteBackupCount = 0;
+			selectedBackupPath.clear();
+			selectedOriginalPaths.clear();
+			currentSelectionItr = g_backupIndex.end();
+			lastClickIndex = -1;
+			rangeSelectMinIndex = -1;
+			rangeSelectMaxIndex = -1;
+
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Cancel", ImVec2(120, 0)))
+		{
+			pendingDeleteBackupCount = 0;
+			ImGui::CloseCurrentPopup();
+		}
+
+		ImGui::EndPopup();
 	}
 }
 
