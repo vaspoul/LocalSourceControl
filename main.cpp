@@ -1391,11 +1391,12 @@ static void UI_BackedUpFiles()
 
 		if (ImGui::BeginChild("backed_up_files_left", ImVec2(leftPaneWidth, paneHeight), false))
 		{
-			if (ImGui::BeginTable("backed_up_files_left_table", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY))
+			if (ImGui::BeginTable("backed_up_files_left_table", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY))
 			{
 				ImGui::TableSetupColumn("Path", ImGuiTableColumnFlags_WidthStretch, 1.0f);
 				ImGui::TableSetupColumn("Filename", ImGuiTableColumnFlags_WidthStretch, 0.6f);
 				ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthFixed, 60.0f);
+				ImGui::TableSetupColumn("Latest Backup", ImGuiTableColumnFlags_WidthFixed, 170.0f);
 				ImGui::TableHeadersRow();
 
 				for (const std::wstring& originalPath : visibleOriginalPaths)
@@ -1466,6 +1467,13 @@ static void UI_BackedUpFiles()
 
 					ImGui::TableNextColumn();
 					ImGui::Text("%d", (int)backupPaths.size());
+
+					ImGui::TableNextColumn();
+					{
+						const std::wstring& latestBackupForRow = backupPaths.back();
+						std::wstring latestTimestamp = BackupTimestampFromBackupPath(latestBackupForRow);
+						ImGui::TextUnformatted(WToUTF8(latestTimestamp).c_str());
+					}
 
 					float rowMaxY = ImGui::GetCursorScreenPos().y;
 					ImGuiWindow* tableWindow = ImGui::GetCurrentWindow();
@@ -2087,5 +2095,3 @@ void AppShutdown()
 {
 	StopWatchers();
 }
-
-
