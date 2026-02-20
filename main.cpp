@@ -1445,7 +1445,17 @@ static void UI_BackedUpFiles()
 			switch (column)
 			{
 			case 0: // Path
-				compareResult = left.originalPath.compare(right.originalPath);
+				{
+					const std::fs::path leftPath(left.originalPath);
+					const std::fs::path rightPath(right.originalPath);
+					const std::wstring leftDir = leftPath.parent_path().wstring();
+					const std::wstring rightDir = rightPath.parent_path().wstring();
+					compareResult = leftDir.compare(rightDir);
+					if (compareResult == 0)
+					{
+						compareResult = leftPath.filename().wstring().compare(rightPath.filename().wstring());
+					}
+				}
 				break;
 			case 1: // Filename
 				compareResult = std::fs::path(left.originalPath).filename().wstring().compare(
