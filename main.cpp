@@ -35,8 +35,6 @@ struct FolderWatcher
 	std::unordered_map<std::wstring, uint64_t>	lastEventTickByPath;
 };
 
-static const uint32_t										kOperationHistoryMaxCount = 1024;
-
 static std::shared_mutex									g_indexMutex;
 static std::list<BackupFile>								g_backupIndex;
 static std::mutex											g_historyMutex;
@@ -304,10 +302,6 @@ static void InsertTodayHistory(const std::wstring& originalPath, const TimePoint
 
 	g_todayHistory.insert(insertIt, std::move(item));
 
-	if (g_todayHistory.size() > kOperationHistoryMaxCount)
-	{
-		g_todayHistory.resize(kOperationHistoryMaxCount);
-	}
 }
 
 static void RebuildTodayHistory()
@@ -340,10 +334,6 @@ static void RebuildTodayHistory()
 		return left.timePoint > right.timePoint;
 	});
 
-	if (rebuilt.size() > kOperationHistoryMaxCount)
-	{
-		rebuilt.resize(kOperationHistoryMaxCount);
-	}
 
 	{
 		std::lock_guard<std::mutex> lock(g_historyMutex);
@@ -2040,13 +2030,17 @@ static void UI_History()
 	ImGui::Dummy(ImVec2(0,4));
 
 	static int selectedOperationIndex = -1;
+	static std::set<int> selectedOperationIndices;
+	static int lastHistoryClickIndex = -1;
+	static size_t pendingDeleteCount = 0;
 
-	ImGui::Text("Last %d operations", kOperationHistoryMaxCount);
+	ImGui::Text("Today's operations");
 
 	ImGui::Separator();
 
 	bool isCtrlDown = ImGui::GetIO().KeyCtrl;
 	bool isDiffPressed = isCtrlDown && ImGui::IsKeyPressed(ImGuiKey_D, false);
+	bool deleteRequested = ImGui::IsKeyPressed(ImGuiKey_Delete, false);
 
 	HistoryEntry selectedOperationCopy = {};
 	bool hasSelectedOperation = false;
@@ -2057,6 +2051,21 @@ static void UI_History()
 		if (selectedOperationIndex < 0 || selectedOperationIndex >= (int)g_todayHistory.size())
 		{
 			selectedOperationIndex = -1;
+		}
+
+		if (!selectedOperationIndices.empty())
+		{
+			for (auto it = selectedOperationIndices.begin(); it != selectedOperationIndices.end(); )
+			{
+				if (*it < 0 || *it >= (int)g_todayHistory.size())
+				{
+					it = selectedOperationIndices.erase(it);
+				}
+				else
+				{
+					++it;
+				}
+			}
 		}
 
 		ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(6.0f, 6.0f));
@@ -2140,7 +2149,60 @@ static void UI_History()
 
 				float rowMaxY = ImGui::GetCursorScreenPos().y;
 
-				HandleRowSelectAndHighlight(operationIndex, selectedOperationIndex, rowMinY, rowMaxY);
+				ImGuiWindow* tableWindow = ImGui::GetCurrentWindow();
+				if (tableWindow)
+				{
+					ImVec2 windowPos = tableWindow->Pos;
+					ImVec2 contentMin = ImGui::GetWindowContentRegionMin();
+					ImVec2 contentMax = ImGui::GetWindowContentRegionMax();
+					ImVec2 rowMin(windowPos.x + contentMin.x, rowMinY);
+					ImVec2 rowMax(windowPos.x + contentMax.x, rowMaxY);
+
+					bool isHovered = ImGui::IsMouseHoveringRect(rowMin, rowMax, false);
+					bool isSelected = (selectedOperationIndices.find(operationIndex) != selectedOperationIndices.end());
+
+					if (isHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+					{
+						if (isDiffPressed)
+						{
+							isDiffPressed = false;
+						}
+
+						if (ImGui::GetIO().KeyShift && lastHistoryClickIndex >= 0)
+						{
+							int rangeStart = std::min(lastHistoryClickIndex, operationIndex);
+							int rangeEnd = std::max(lastHistoryClickIndex, operationIndex);
+							for (int idx = rangeStart; idx <= rangeEnd; ++idx)
+							{
+								selectedOperationIndices.insert(idx);
+							}
+						}
+						else if (ImGui::GetIO().KeyCtrl)
+						{
+							selectedOperationIndices.insert(operationIndex);
+						}
+						else
+						{
+							selectedOperationIndices.clear();
+							selectedOperationIndices.insert(operationIndex);
+						}
+
+						lastHistoryClickIndex = operationIndex;
+						selectedOperationIndex = operationIndex;
+						isSelected = (selectedOperationIndices.find(operationIndex) != selectedOperationIndices.end());
+					}
+
+					if (isSelected)
+					{
+						ImU32 bgColor = ImGui::GetColorU32(ImGuiCol_Header);
+						ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, bgColor);
+					}
+					else if (isHovered)
+					{
+						ImU32 hoverColor = ImGui::GetColorU32(ImGuiCol_HeaderHovered);
+						ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg0, hoverColor);
+					}
+				}
 
 				if (operationIndex == selectedOperationIndex)
 				{
@@ -2155,6 +2217,90 @@ static void UI_History()
 		}
 
 		ImGui::PopStyleVar();
+	}
+
+	if (deleteRequested && !selectedOperationIndices.empty())
+	{
+		pendingDeleteCount = selectedOperationIndices.size();
+		ImGui::OpenPopup("Delete Backups");
+	}
+
+	if (ImGui::BeginPopupModal("Delete Backups", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
+	{
+		ImGui::Text("Delete %zu history entries?", pendingDeleteCount);
+		ImGui::Separator();
+
+		if (ImGui::Button("Delete", ImVec2(120, 0)))
+		{
+			std::vector<HistoryEntry> entriesToDelete;
+			entriesToDelete.reserve(selectedOperationIndices.size());
+			{
+				std::lock_guard<std::mutex> lock(g_historyMutex);
+				for (int idx : selectedOperationIndices)
+				{
+					if (idx >= 0 && idx < (int)g_todayHistory.size())
+					{
+						entriesToDelete.push_back(g_todayHistory[idx]);
+					}
+				}
+			}
+
+			{
+				std::unique_lock<std::shared_mutex> indexLock(g_indexMutex);
+				for (const auto& entry : entriesToDelete)
+				{
+					auto entryItr = g_backupIndex.end();
+					for (entryItr = g_backupIndex.begin(); entryItr != g_backupIndex.end(); ++entryItr)
+					{
+						if (entryItr->originalPath == entry.originalPath)
+						{
+							break;
+						}
+					}
+					if (entryItr != g_backupIndex.end())
+					{
+						auto& backups = entryItr->backups;
+						backups.erase(
+							std::remove(backups.begin(), backups.end(), entry.timePoint),
+							backups.end());
+					}
+				}
+			}
+
+			for (const auto& entry : entriesToDelete)
+			{
+				std::error_code errorCode;
+				std::fs::remove(entry.backupPath, errorCode);
+				RemoveFromTodayHistory(entry.originalPath, entry.timePoint);
+			}
+
+			{
+				std::lock_guard<std::mutex> lock(g_historyMutex);
+				for (auto it = selectedOperationIndices.rbegin(); it != selectedOperationIndices.rend(); ++it)
+				{
+					int idx = *it;
+					if (idx >= 0 && idx < (int)g_todayHistory.size())
+					{
+						g_todayHistory.erase(g_todayHistory.begin() + idx);
+					}
+				}
+			}
+
+			selectedOperationIndices.clear();
+			selectedOperationIndex = -1;
+			lastHistoryClickIndex = -1;
+			pendingDeleteCount = 0;
+
+			ImGui::CloseCurrentPopup();
+		}
+		ImGui::SameLine();
+		if (ImGui::Button("Cancel", ImVec2(120, 0)))
+		{
+			pendingDeleteCount = 0;
+			ImGui::CloseCurrentPopup();
+		}
+
+		ImGui::EndPopup();
 	}
 
 	if (isDiffPressed && hasSelectedOperation)
