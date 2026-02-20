@@ -76,3 +76,56 @@ jobs:
       uses: softprops/action-gh-release@v2
       with:
         files: dist/LocalSourceControl.exe
+
+  release_on_version_commit:
+    needs: build
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Determine version tag
+      id: version
+      shell: pwsh
+      run: |
+        $msg = (git log -1 --pretty=%s).Trim()
+        if ($msg -match '^v\d+\.\d+\.\d+$') {
+          $tag = $msg
+          $exists = git tag -l $tag
+          if ($exists) {
+            "match=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "reason=tag_exists" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          } else {
+            "match=true" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+            "tag=$tag" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          }
+        } else {
+          "match=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+          "reason=no_match" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+        }
+
+    - name: Create tag
+      if: steps.version.outputs.match == 'true'
+      shell: pwsh
+      run: |
+        git tag ${{ steps.version.outputs.tag }}
+        git push origin ${{ steps.version.outputs.tag }}
+
+    - name: Download exe artifact
+      if: steps.version.outputs.match == 'true'
+      uses: actions/download-artifact@v4
+      with:
+        name: LocalSourceControl-exe
+        path: dist
+
+    - name: Create GitHub Release
+      if: steps.version.outputs.match == 'true'
+      uses: softprops/action-gh-release@v2
+      with:
+        tag_name: ${{ steps.version.outputs.tag }}
+        name: ${{ steps.version.outputs.tag }}
+        files: dist/LocalSourceControl.exe
