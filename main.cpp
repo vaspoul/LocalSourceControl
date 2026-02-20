@@ -55,6 +55,8 @@ static std::vector<std::unique_ptr<FolderWatcher>>			g_watchers;
 
 static std::atomic<uint32_t>								g_backupsToday;
 static std::wstring											g_todayPrefix;
+static std::atomic<bool>									g_isPaused;
+static std::atomic<uint64_t>								g_pauseUntilTick;
 		
 // Sanitize "C:\foo\bar" -> "C\foo\bar" so it can be nested under backup root
 static std::wstring SanitizePathForBackup(const std::wstring& absolutePath)
@@ -245,6 +247,32 @@ static std::wstring NormalizePathSlashes(std::wstring value)
 	}
 
 	return value;
+}
+
+static bool IsPaused()
+{
+	if (!g_isPaused.load(std::memory_order_relaxed))
+	{
+		return false;
+	}
+
+	uint64_t pauseUntil = g_pauseUntilTick.load(std::memory_order_relaxed);
+
+	// infinite pause
+	if (pauseUntil == 0)
+	{
+		return true;
+	}
+
+	uint64_t nowTick = GetTickCount64();
+	if (nowTick >= pauseUntil)
+	{
+		g_pauseUntilTick.store(0, std::memory_order_relaxed);
+		g_isPaused.store(false, std::memory_order_relaxed);
+		return false;
+	}
+
+	return true;
 }
 
 static void RemoveFromTodayHistory(const std::wstring& originalPath, const TimePoint& timePoint)
@@ -618,6 +646,11 @@ static void EnforceGlobalSizeLimit(const std::fs::path& backupRootPath, uint32_t
 static bool CopyToBackupAndIndex(const WatchedFolder& watchedFolder, const std::wstring& filePath)
 {
 	(void)watchedFolder;
+
+	if (IsPaused())
+	{
+		return false;
+	}
 
 	if (g_settings.backupRoot.empty())
 	{
@@ -2240,6 +2273,24 @@ static void UI_Settings()
 
 		ImGui::TableNextRow();
 		ImGui::TableNextColumn();
+		ImGui::TextUnformatted("Pause duration (minutes)");
+		ImGui::SameLine();
+		ImGui::HelpTooltip("Used by the 'Pause For N Minutes' button.");
+		ImGui::TableNextColumn();
+		ImGui::SetNextItemWidth(240.0f);
+		int pauseMinutes = (int)g_settings.pauseMinutes;
+		if (ImGui::InputInt("##pauseMinutes", &pauseMinutes))
+		{
+			if (pauseMinutes < 1)
+			{
+				pauseMinutes = 1;
+			}
+			g_settings.pauseMinutes = (uint32_t)pauseMinutes;
+			MarkSettingsDirty();
+		}
+
+		ImGui::TableNextRow();
+		ImGui::TableNextColumn();
 		ImGui::TextUnformatted("Diff tool executable");
 		ImGui::SameLine();
 		ImGui::HelpTooltip( "Used by Ctrl+D in Backup History.\n"
@@ -2333,30 +2384,133 @@ bool AppLoop()
 
 bool AppDraw()
 {
-	if (ImGui::BeginTabBar("tabs"))
+	const float barHeight = 38.0f;
+	const float buttonHeight = 30.0f;
+	const float barSpacing = 6.0f;
+	float contentHeight = ImGui::GetContentRegionAvail().y - barHeight - barSpacing;
+	if (contentHeight < 0.0f)
 	{
-		if (ImGui::BeginTabItem(" Watched Folders "))
-		{
-			UI_WatchedFolders();
-			ImGui::EndTabItem();
-		}
-		if (ImGui::BeginTabItem(" Backed Up Files "))
-		{
-			UI_BackedUpFiles();
-			ImGui::EndTabItem();
-		}
-		if (ImGui::BeginTabItem("       Log       "))
-		{
-			UI_History();
-			ImGui::EndTabItem();
-		}
-		if (ImGui::BeginTabItem("    Settings     "))
-		{
-			UI_Settings();
-			ImGui::EndTabItem();
-		}
-		ImGui::EndTabBar();
+		contentHeight = 0.0f;
 	}
+
+	if (ImGui::BeginChild("main_content", ImVec2(0.0f, contentHeight), false))
+	{
+		if (ImGui::BeginTabBar("tabs"))
+		{
+			if (ImGui::BeginTabItem(" Watched Folders "))
+			{
+				UI_WatchedFolders();
+				ImGui::EndTabItem();
+			}
+			if (ImGui::BeginTabItem(" Backed Up Files "))
+			{
+				UI_BackedUpFiles();
+				ImGui::EndTabItem();
+			}
+			if (ImGui::BeginTabItem("       Log       "))
+			{
+				UI_History();
+				ImGui::EndTabItem();
+			}
+			if (ImGui::BeginTabItem("    Settings     "))
+			{
+				UI_Settings();
+				ImGui::EndTabItem();
+			}
+			ImGui::EndTabBar();
+		}
+	}
+	ImGui::EndChild();
+
+	ImGui::Spacing();
+	ImGui::Separator();
+
+	if (ImGui::BeginChild("pause_bar", ImVec2(0.0f, barHeight), false, ImGuiWindowFlags_NoScrollbar))
+	{
+		auto CenterNext = [&](float totalWidth)
+		{
+			float startX = (ImGui::GetContentRegionAvail().x - totalWidth) * 0.5f;
+			if (startX < 0.0f)
+			{
+				startX = 0.0f;
+			}
+			ImGui::SetCursorPosX(startX);
+		};
+
+		float centerY = (barHeight - buttonHeight) * 0.5f;
+		if (centerY > 0.0f)
+		{
+			ImGui::SetCursorPosY(centerY);
+		}
+
+		if (!IsPaused())
+		{
+			const float buttonSpacing = ImGui::GetStyle().ItemSpacing.x;
+			const float pauseWidth = 140.0f;
+			const float pauseForWidth = 220.0f;
+			const float totalWidth = pauseWidth + buttonSpacing + pauseForWidth;
+			CenterNext(totalWidth);
+
+			if (ImGui::Button("Pause", ImVec2(140, buttonHeight)))
+			{
+				g_pauseUntilTick.store(0, std::memory_order_relaxed);
+				g_isPaused.store(true, std::memory_order_relaxed);
+			}
+
+			ImGui::SameLine();
+			if (ImGui::Button(fmt::format("Pause For {} Minutes", g_settings.pauseMinutes).c_str(), ImVec2(220, buttonHeight)))
+			{
+				uint64_t durationMs = (uint64_t)g_settings.pauseMinutes * 60ull * 1000ull;
+				g_pauseUntilTick.store(GetTickCount64() + durationMs, std::memory_order_relaxed);
+				g_isPaused.store(true, std::memory_order_relaxed);
+			}
+		}
+		else
+		{
+			const float buttonSpacing = ImGui::GetStyle().ItemSpacing.x;
+			const float pauseWidth = 140.0f;
+			const float pauseForWidth = 220.0f;
+			const float totalWidth = pauseWidth + buttonSpacing + pauseForWidth;
+			CenterNext(totalWidth);
+
+			if (ImGui::Button("Resume", ImVec2(pauseWidth, buttonHeight)))
+			{
+				g_pauseUntilTick.store(0, std::memory_order_relaxed);
+				g_isPaused.store(false, std::memory_order_relaxed);
+			}
+
+			ImGui::SameLine();
+			if (ImGui::BeginChild("pause_resume_timer", ImVec2(pauseForWidth, buttonHeight), false, ImGuiWindowFlags_NoScrollbar))
+			{
+				uint64_t pauseUntil = g_pauseUntilTick.load(std::memory_order_relaxed);
+				if (pauseUntil != 0)
+				{
+					uint64_t nowTick = GetTickCount64();
+					uint64_t remainingMs = (pauseUntil > nowTick) ? (pauseUntil - nowTick) : 0;
+					uint64_t remainingSeconds = remainingMs / 1000ull;
+					uint64_t remainingMinutes = remainingSeconds / 60ull;
+					uint64_t remainingSecondsOnly = remainingSeconds % 60ull;
+					std::string message = fmt::format("Resuming in {:02d}:{:02d}", (int)remainingMinutes, (int)remainingSecondsOnly);
+					ImVec2 textSize = ImGui::CalcTextSize(message.c_str());
+					ImVec2 boxSize = ImGui::GetContentRegionAvail();
+					float textX = (boxSize.x - textSize.x) * 0.5f;
+					float textY = (boxSize.y - textSize.y) * 0.5f;
+					if (textX < 0.0f)
+					{
+						textX = 0.0f;
+					}
+					if (textY < 0.0f)
+					{
+						textY = 0.0f;
+					}
+					ImGui::SetCursorPos(ImVec2(textX, textY));
+					ImGui::TextUnformatted(message.c_str());
+				}
+			}
+			ImGui::EndChild();
+		}
+	}
+	ImGui::EndChild();
 
 	return false;
 }

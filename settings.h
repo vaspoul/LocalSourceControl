@@ -13,6 +13,7 @@ struct Settings
 	uint32_t		maxBackupsPerFile = 256;
 	std::wstring	diffToolPath;
 	bool			minimizeOnClose = true;
+	uint32_t		pauseMinutes = 10;
 
 	std::vector<WatchedFolder> watched;
 };

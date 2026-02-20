@@ -135,6 +135,7 @@ void SaveSettings()
 	WriteText("W=" + std::to_string(g_settings.winW) + "\n");
 	WriteText("H=" + std::to_string(g_settings.winH) + "\n\n");
 	WriteText("MinimizeOnClose=" + std::to_string(g_settings.minimizeOnClose ? 1 : 0) + "\n");
+	WriteText("PauseMinutes=" + std::to_string(g_settings.pauseMinutes) + "\n\n");
 
 	WriteText("[Backup]\n");
 	WriteText("Root=" + WToUTF8(g_settings.backupRoot) + "\n");
@@ -260,6 +261,7 @@ void LoadSettings()
 	loadedSettings.winW = std::stoi(GetINIValue(parsedIni, "Window", "W", std::to_string(loadedSettings.winW)));
 	loadedSettings.winH = std::stoi(GetINIValue(parsedIni, "Window", "H", std::to_string(loadedSettings.winH)));
 	loadedSettings.minimizeOnClose = GetINIValue(parsedIni, "Window", "MinimizeOnClose", "1") != "0";
+	loadedSettings.pauseMinutes = (uint32_t)std::stoul(GetINIValue(parsedIni, "Window", "PauseMinutes", std::to_string(loadedSettings.pauseMinutes)));
 
 
 	loadedSettings.backupRoot = UTF8ToW(GetINIValue(parsedIni, "Backup", "Root", WToUTF8(loadedSettings.backupRoot)));
