@@ -2121,6 +2121,10 @@ static void UI_History()
 					std::string originalUtf8 = WToUTF8(backupOperation.originalPath);
 
 					ImGui::TextClickable("%s", originalUtf8.c_str());
+					if (ImGui::IsItemHovered())
+					{
+						ImGui::SetTooltip("%s", originalUtf8.c_str());
+					}
 
 					if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 					{
@@ -2151,6 +2155,10 @@ static void UI_History()
 					std::string backupUtf8 = WToUTF8(backupOperation.backupPath);
 
 					ImGui::TextClickable("%s", backupUtf8.c_str());
+					if (ImGui::IsItemHovered())
+					{
+						ImGui::SetTooltip("%s", backupUtf8.c_str());
+					}
 
 					if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 					{
