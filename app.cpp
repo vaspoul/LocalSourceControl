@@ -242,6 +242,7 @@ static void RestoreFromTray(HWND windowHandle)
 
 int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
 {
+#if defined(CI_BUILD)
 	g_singleInstanceMutex = CreateMutexW(nullptr, TRUE, L"LocalSourceControl_SingleInstance_Mutex");
 	if (g_singleInstanceMutex && GetLastError() == ERROR_ALREADY_EXISTS)
 	{
@@ -250,6 +251,7 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE, LPWSTR, int)
 		g_singleInstanceMutex = nullptr;
 		return 0;
 	}
+#endif
 
 	HRESULT hrCo = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
 	(void)hrCo;
