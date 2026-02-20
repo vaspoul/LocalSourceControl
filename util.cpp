@@ -211,6 +211,40 @@ bool InputTextStdString(const char* label, std::wstring& value, ImGuiInputTextFl
 	return changed;
 }
 
+bool InputTextMultilineStdString(const char* label, std::string& s, const ImVec2& size, ImGuiInputTextFlags flags)
+{
+	if (s.capacity() < 256)
+	{
+		s.reserve(256);
+	}
+
+	flags |= ImGuiInputTextFlags_CallbackResize;
+	return ImGui::InputTextMultiline(label, s.data(), s.capacity() + 1, size, flags,
+		[](ImGuiInputTextCallbackData* data)
+		{
+			if (data->EventFlag == ImGuiInputTextFlags_CallbackResize)
+			{
+				auto* str = (std::string*)data->UserData;
+				str->resize((size_t)data->BufTextLen);
+				data->Buf = str->data();
+			}
+			return 0;
+		}, (void*)&s);
+}
+
+bool InputTextMultilineStdString(const char* label, std::wstring& value, const ImVec2& size, ImGuiInputTextFlags flags)
+{
+	std::string utf8Value = WToUTF8(value);
+
+	bool changed = ImGui::InputTextMultilineStdString(label, utf8Value, size, flags);
+	if (changed)
+	{
+		value = UTF8ToW(utf8Value);
+	}
+
+	return changed;
+}
+
 void HelpTooltip(const char* text)
 {
 	ImGui::SameLine();

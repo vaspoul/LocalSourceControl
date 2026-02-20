@@ -17,6 +17,8 @@ namespace ImGui
 {
 bool						InputTextStdString(const char* label, std::string& s, ImGuiInputTextFlags flags = 0);
 bool						InputTextStdString(const char* label, std::wstring& value, ImGuiInputTextFlags flags = 0);
+bool						InputTextMultilineStdString(const char* label, std::string& s, const ImVec2& size = ImVec2(0, 0), ImGuiInputTextFlags flags = 0);
+bool						InputTextMultilineStdString(const char* label, std::wstring& value, const ImVec2& size = ImVec2(0, 0), ImGuiInputTextFlags flags = 0);
 void						HelpTooltip(const char* text);
 bool						TextClickable(const char* fmt, ...);
 bool						TextClickable(const std::wstring& text);

@@ -1139,6 +1139,8 @@ static void UI_WatchedFolders()
 	{
 		ImGui::SetCursorPos(ImGui::GetCursorPos() + ImVec2(8,8));
 
+		ImGui::PushID(selectedFolderIndex);
+
 		if (ImGui::BeginChild("properties_inner", ImGui::GetContentRegionAvail() - ImVec2(8,8)))
 		{
 			if (selectedFolderIndex < 0 || selectedFolderIndex >= (int)g_settings.watched.size())
@@ -1206,7 +1208,7 @@ static void UI_WatchedFolders()
 					ImGui::TableNextColumn();
 					{
 						ImGui::SetNextItemWidth(-1.0f);
-						if (ImGui::InputTextStdString("##include_filters", watchedFolder.includeFiltersCSV))
+						if (ImGui::InputTextMultilineStdString("##include_filters", watchedFolder.includeFiltersCSV, ImVec2(-1.0f, 60.0f), ImGuiInputTextFlags_WordWrap))
 						{
 							MarkSettingsDirty();
 						}
@@ -1222,7 +1224,7 @@ static void UI_WatchedFolders()
 					ImGui::TableNextColumn();
 					{
 						ImGui::SetNextItemWidth(-1.0f);
-						if (ImGui::InputTextStdString("##exclude_filters", watchedFolder.excludeFiltersCSV))
+						if (ImGui::InputTextMultilineStdString("##exclude_filters", watchedFolder.excludeFiltersCSV, ImVec2(-1.0f, 60.0f), ImGuiInputTextFlags_WordWrap))
 						{
 							MarkSettingsDirty();
 						}
@@ -1232,7 +1234,7 @@ static void UI_WatchedFolders()
 					ImGui::TableNextColumn();
 					ImGui::TextUnformatted("Actions");
 					ImGui::TableNextColumn();
-					if (ImGui::Button("Apply All"))
+					if (ImGui::Button("Apply"))
 					{
 						MarkSettingsDirty();
 						SaveSettings();
@@ -1249,6 +1251,8 @@ static void UI_WatchedFolders()
 			}
 		}
 		ImGui::EndChild();
+	
+		ImGui::PopID();
 	}
 	ImGui::EndChild();
 
