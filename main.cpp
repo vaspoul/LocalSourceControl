@@ -1929,7 +1929,25 @@ static void UI_BackedUpFiles()
 
 			if (!selectedEntry.originalPath.empty() && !selectedBackupPath.empty())
 			{
-				LaunchDiffTool(g_settings.diffToolPath, selectedBackupPath, selectedEntry.originalPath);
+				bool hasPrevious = false;
+				std::wstring previousBackupPath;
+				for (size_t i = 0; i < selectedEntry.backups.size(); ++i)
+				{
+					if (MakeBackupPathFromTimePoint(g_settings.backupRoot, selectedEntry.originalPath, selectedEntry.backups[i]) == selectedBackupPath)
+					{
+						if (i > 0)
+						{
+							hasPrevious = true;
+							previousBackupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, selectedEntry.originalPath, selectedEntry.backups[i - 1]);
+						}
+						break;
+					}
+				}
+
+				if (hasPrevious)
+				{
+					LaunchDiffTool(g_settings.diffToolPath, previousBackupPath, selectedBackupPath);
+				}
 			}
 		}
 	}
@@ -2085,7 +2103,7 @@ static void UI_History()
 			ImGui::TableSetupColumn("Path");
 			ImGui::TableSetupColumn("Backup Time", ImGuiTableColumnFlags_WidthFixed, 160.0f);
 			ImGui::TableSetupColumn("Backup Path");
-			ImGui::TableSetupColumn("Result", ImGuiTableColumnFlags_WidthFixed, 220.0f);
+			ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 260.0f);
 			ImGui::TableHeadersRow();
 
 			for (int operationIndex = 0; operationIndex < (int)g_todayHistory.size(); ++operationIndex)
@@ -2154,8 +2172,56 @@ static void UI_History()
 					}
 				}
 
-				ImGui::TableNextColumn();
-				ImGui::TextUnformatted("OK");
+			ImGui::TableNextColumn();
+			{
+				bool hasPrevious = false;
+				std::wstring previousBackupPath;
+				{
+					std::shared_lock<std::shared_mutex> indexLock(g_indexMutex);
+					auto entryItr = g_backupIndex.end();
+					for (entryItr = g_backupIndex.begin(); entryItr != g_backupIndex.end(); ++entryItr)
+					{
+						if (entryItr->originalPath == backupOperation.originalPath)
+						{
+							break;
+						}
+					}
+					if (entryItr != g_backupIndex.end())
+					{
+						const auto& backups = entryItr->backups;
+						for (size_t i = 0; i < backups.size(); ++i)
+						{
+							if (backups[i] == backupOperation.timePoint)
+							{
+								if (i > 0)
+								{
+									hasPrevious = true;
+									previousBackupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, backupOperation.originalPath, backups[i - 1]);
+								}
+								break;
+							}
+						}
+					}
+				}
+				if (!hasPrevious)
+				{
+					ImGui::BeginDisabled();
+				}
+				if (ImGui::Button("Diff Previous"))
+				{
+					LaunchDiffTool(g_settings.diffToolPath, previousBackupPath, backupOperation.backupPath);
+				}
+				if (!hasPrevious)
+				{
+					ImGui::EndDisabled();
+				}
+
+				ImGui::SameLine();
+				if (ImGui::Button("Diff Current"))
+				{
+					LaunchDiffTool(g_settings.diffToolPath, backupOperation.backupPath, backupOperation.originalPath);
+				}
+			}
 
 				float rowMaxY = ImGui::GetCursorScreenPos().y;
 
@@ -2315,7 +2381,40 @@ static void UI_History()
 
 	if (isDiffPressed && hasSelectedOperation)
 	{
-		LaunchDiffTool(g_settings.diffToolPath, selectedOperationCopy.backupPath, selectedOperationCopy.originalPath);
+		bool hasPrevious = false;
+		std::wstring previousBackupPath;
+		{
+			std::shared_lock<std::shared_mutex> indexLock(g_indexMutex);
+			auto entryItr = g_backupIndex.end();
+			for (entryItr = g_backupIndex.begin(); entryItr != g_backupIndex.end(); ++entryItr)
+			{
+				if (entryItr->originalPath == selectedOperationCopy.originalPath)
+				{
+					break;
+				}
+			}
+			if (entryItr != g_backupIndex.end())
+			{
+				const auto& backups = entryItr->backups;
+				for (size_t i = 0; i < backups.size(); ++i)
+				{
+					if (backups[i] == selectedOperationCopy.timePoint)
+					{
+						if (i > 0)
+						{
+							hasPrevious = true;
+							previousBackupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, selectedOperationCopy.originalPath, backups[i - 1]);
+						}
+						break;
+					}
+				}
+			}
+		}
+
+		if (hasPrevious)
+		{
+			LaunchDiffTool(g_settings.diffToolPath, previousBackupPath, selectedOperationCopy.backupPath);
+		}
 	}
 }
 
