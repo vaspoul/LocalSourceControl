@@ -44,7 +44,7 @@ jobs:
       # See https://docs.microsoft.com/visualstudio/msbuild/msbuild-command-line-reference
       run: msbuild /m /p:DefineConstants="CI_BUILD" /p:Configuration=${{env.BUILD_CONFIGURATION}} ${{env.SOLUTION_FILE_PATH}}
 
-    - name: Collect exe
+    - name: Collect exe and pdb
       shell: pwsh
       run: |
         $outDir = Join-Path $env:GITHUB_WORKSPACE "dist"
@@ -52,12 +52,17 @@ jobs:
         $exe = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Recurse -Filter "LocalSourceControl.exe" | Select-Object -First 1
         if (-not $exe) { throw "LocalSourceControl.exe not found after build." }
         Copy-Item $exe.FullName -Destination (Join-Path $outDir $exe.Name) -Force
+        $pdb = Get-ChildItem -Path $env:GITHUB_WORKSPACE -Recurse -Filter "LocalSourceControl.pdb" | Select-Object -First 1
+        if (-not $pdb) { throw "LocalSourceControl.pdb not found after build." }
+        Copy-Item $pdb.FullName -Destination (Join-Path $outDir $pdb.Name) -Force
 
-    - name: Upload exe artifact
+    - name: Upload exe and pdb artifact
       uses: actions/upload-artifact@v4
       with:
         name: LocalSourceControl-exe
-        path: dist/LocalSourceControl.exe
+        path: |
+          dist/LocalSourceControl.exe
+          dist/LocalSourceControl.pdb
 
   release:
     needs: build
@@ -75,7 +80,9 @@ jobs:
     - name: Create GitHub Release
       uses: softprops/action-gh-release@v2
       with:
-        files: dist/LocalSourceControl.exe
+        files: |
+          dist/LocalSourceControl.exe
+          dist/LocalSourceControl.pdb
 
   release_on_version_commit:
     needs: build
@@ -128,4 +135,6 @@ jobs:
       with:
         tag_name: ${{ steps.version.outputs.tag }}
         name: ${{ steps.version.outputs.tag }}
-        files: dist/LocalSourceControl.exe
+        files: |
+          dist/LocalSourceControl.exe
+          dist/LocalSourceControl.pdb
