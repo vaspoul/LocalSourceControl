@@ -2062,13 +2062,22 @@ static void UI_History()
 	static int lastHistoryClickIndex = -1;
 	static size_t pendingDeleteCount = 0;
 
-	ImGui::Text("Today's operations");
+	ImGui::Text("Today's operations (%d)", g_todayHistory.size());
 
 	ImGui::Separator();
 
 	bool isCtrlDown = ImGui::GetIO().KeyCtrl;
+	bool isShiftDown = ImGui::GetIO().KeyShift;
 	bool isDiffPressed = isCtrlDown && ImGui::IsKeyPressed(ImGuiKey_D, false);
 	bool deleteRequested = ImGui::IsKeyPressed(ImGuiKey_Delete, false);
+	bool deleteModalOpen = ImGui::IsPopupOpen("Delete Backups");
+	if (deleteModalOpen)
+	{
+		isCtrlDown = false;
+		isShiftDown = false;
+		isDiffPressed = false;
+		deleteRequested = false;
+	}
 
 	HistoryEntry selectedOperationCopy = {};
 	bool hasSelectedOperation = false;
@@ -2126,7 +2135,7 @@ static void UI_History()
 						ImGui::SetTooltip("%s", originalUtf8.c_str());
 					}
 
-					if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+					if (!deleteModalOpen && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 					{
 						selectedOperationIndex = operationIndex;
 						if (!backupOperation.originalPath.empty())
@@ -2135,7 +2144,7 @@ static void UI_History()
 						}
 					}
 
-					if (ImGui::BeginPopupContextItem("original_context"))
+					if (!deleteModalOpen && ImGui::BeginPopupContextItem("original_context"))
 					{
 						if (ImGui::MenuItem("Show in Explorer"))
 						{
@@ -2160,7 +2169,7 @@ static void UI_History()
 						ImGui::SetTooltip("%s", backupUtf8.c_str());
 					}
 
-					if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+					if (!deleteModalOpen && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 					{
 						selectedOperationIndex = operationIndex;
 						if (!backupOperation.backupPath.empty())
@@ -2169,7 +2178,7 @@ static void UI_History()
 						}
 					}
 
-					if (ImGui::BeginPopupContextItem("backup_context"))
+					if (!deleteModalOpen && ImGui::BeginPopupContextItem("backup_context"))
 					{
 						if (ImGui::MenuItem("Show in Explorer"))
 						{
@@ -2180,56 +2189,56 @@ static void UI_History()
 					}
 				}
 
-			ImGui::TableNextColumn();
-			{
-				bool hasPrevious = false;
-				std::wstring previousBackupPath;
+				ImGui::TableNextColumn();
 				{
-					std::shared_lock<std::shared_mutex> indexLock(g_indexMutex);
-					auto entryItr = g_backupIndex.end();
-					for (entryItr = g_backupIndex.begin(); entryItr != g_backupIndex.end(); ++entryItr)
+					bool hasPrevious = false;
+					std::wstring previousBackupPath;
 					{
-						if (entryItr->originalPath == backupOperation.originalPath)
+						std::shared_lock<std::shared_mutex> indexLock(g_indexMutex);
+						auto entryItr = g_backupIndex.end();
+						for (entryItr = g_backupIndex.begin(); entryItr != g_backupIndex.end(); ++entryItr)
 						{
-							break;
-						}
-					}
-					if (entryItr != g_backupIndex.end())
-					{
-						const auto& backups = entryItr->backups;
-						for (size_t i = 0; i < backups.size(); ++i)
-						{
-							if (backups[i] == backupOperation.timePoint)
+							if (entryItr->originalPath == backupOperation.originalPath)
 							{
-								if (i > 0)
-								{
-									hasPrevious = true;
-									previousBackupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, backupOperation.originalPath, backups[i - 1]);
-								}
 								break;
 							}
 						}
+						if (entryItr != g_backupIndex.end())
+						{
+							const auto& backups = entryItr->backups;
+							for (size_t i = 0; i < backups.size(); ++i)
+							{
+								if (backups[i] == backupOperation.timePoint)
+								{
+									if (i > 0)
+									{
+										hasPrevious = true;
+										previousBackupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, backupOperation.originalPath, backups[i - 1]);
+									}
+									break;
+								}
+							}
+						}
+					}
+					if (!hasPrevious)
+					{
+						ImGui::BeginDisabled();
+					}
+					if (ImGui::Button("Diff Previous"))
+					{
+						LaunchDiffTool(g_settings.diffToolPath, previousBackupPath, backupOperation.backupPath);
+					}
+					if (!hasPrevious)
+					{
+						ImGui::EndDisabled();
+					}
+
+					ImGui::SameLine();
+					if (ImGui::Button("Diff Current"))
+					{
+						LaunchDiffTool(g_settings.diffToolPath, backupOperation.backupPath, backupOperation.originalPath);
 					}
 				}
-				if (!hasPrevious)
-				{
-					ImGui::BeginDisabled();
-				}
-				if (ImGui::Button("Diff Previous"))
-				{
-					LaunchDiffTool(g_settings.diffToolPath, previousBackupPath, backupOperation.backupPath);
-				}
-				if (!hasPrevious)
-				{
-					ImGui::EndDisabled();
-				}
-
-				ImGui::SameLine();
-				if (ImGui::Button("Diff Current"))
-				{
-					LaunchDiffTool(g_settings.diffToolPath, backupOperation.backupPath, backupOperation.originalPath);
-				}
-			}
 
 				float rowMaxY = ImGui::GetCursorScreenPos().y;
 
@@ -2242,17 +2251,17 @@ static void UI_History()
 					ImVec2 rowMin(windowPos.x + contentMin.x, rowMinY);
 					ImVec2 rowMax(windowPos.x + contentMax.x, rowMaxY);
 
-					bool isHovered = ImGui::IsMouseHoveringRect(rowMin, rowMax, false);
+					bool isHovered = !deleteModalOpen && ImGui::IsMouseHoveringRect(rowMin, rowMax, false);
 					bool isSelected = (selectedOperationIndices.find(operationIndex) != selectedOperationIndices.end());
 
-					if (isHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+					if (!deleteModalOpen && isHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
 					{
 						if (isDiffPressed)
 						{
 							isDiffPressed = false;
 						}
 
-						if (ImGui::GetIO().KeyShift && lastHistoryClickIndex >= 0)
+						if (isShiftDown && lastHistoryClickIndex >= 0)
 						{
 							int rangeStart = std::min(lastHistoryClickIndex, operationIndex);
 							int rangeEnd = std::max(lastHistoryClickIndex, operationIndex);
@@ -2355,7 +2364,6 @@ static void UI_History()
 			{
 				std::error_code errorCode;
 				std::fs::remove(entry.backupPath, errorCode);
-				RemoveFromTodayHistory(entry.originalPath, entry.timePoint);
 			}
 
 			{
