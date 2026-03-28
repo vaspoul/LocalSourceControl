@@ -24,6 +24,9 @@ static const UINT				kTrayMenuExitId = 1002;
 static bool						g_isInTray = false;
 static NOTIFYICONDATAW			g_trayIconData = {};
 static HICON					g_trayIconHandle = nullptr;
+static HICON					g_trayPausedIconHandle = nullptr;
+static HICON					g_appIconHandle = nullptr;
+static HICON					g_appPausedIconHandle = nullptr;
 static HANDLE					g_singleInstanceMutex = nullptr;
 
 
@@ -163,6 +166,55 @@ static void TrayAdd()
 		}
 	}
 
+	if (!g_trayPausedIconHandle)
+	{
+		g_trayPausedIconHandle = (HICON)LoadImageW(
+			GetModuleHandleW(nullptr),
+			MAKEINTRESOURCEW(IDI_APP_ICON_PAUSED),
+			IMAGE_ICON,
+			GetSystemMetrics(SM_CXSMICON),
+			GetSystemMetrics(SM_CYSMICON),
+			0);
+
+		if (!g_trayPausedIconHandle)
+		{
+			// Fallback to a distinct system icon for paused state if no custom icon exists.
+			g_trayPausedIconHandle = LoadIconW(nullptr, IDI_WARNING);
+		}
+	}
+
+	if (!g_appIconHandle)
+	{
+		g_appIconHandle = (HICON)LoadImageW(
+			GetModuleHandleW(nullptr),
+			MAKEINTRESOURCEW(IDI_APP_ICON),
+			IMAGE_ICON,
+			GetSystemMetrics(SM_CXICON),
+			GetSystemMetrics(SM_CYICON),
+			0);
+
+		if (!g_appIconHandle)
+		{
+			g_appIconHandle = LoadIconW(nullptr, IDI_APPLICATION);
+		}
+	}
+
+	if (!g_appPausedIconHandle)
+	{
+		g_appPausedIconHandle = (HICON)LoadImageW(
+			GetModuleHandleW(nullptr),
+			MAKEINTRESOURCEW(IDI_APP_ICON_PAUSED),
+			IMAGE_ICON,
+			GetSystemMetrics(SM_CXICON),
+			GetSystemMetrics(SM_CYICON),
+			0);
+
+		if (!g_appPausedIconHandle)
+		{
+			g_appPausedIconHandle = LoadIconW(nullptr, IDI_WARNING);
+		}
+	}
+
 	ZeroMemory(&g_trayIconData, sizeof(g_trayIconData));
 	g_trayIconData.cbSize = sizeof(g_trayIconData);
 	g_trayIconData.hWnd = g_hWnd;
@@ -190,18 +242,20 @@ static void TrayRemove()
 	ZeroMemory(&g_trayIconData, sizeof(g_trayIconData));
 }
 
-void TrayUpdateBackupCount(uint32_t count)
+void TrayUpdateStatus(uint32_t count, bool isPaused)
 {
-	if (!g_isInTray)
-	{
-		return;
-	}
-
 	wchar_t tooltip[128] = {};
-	swprintf_s(tooltip, L"LocalSourceControl | Backups today: %u", count);
-	wcsncpy_s(g_trayIconData.szTip, tooltip, _TRUNCATE);
-	g_trayIconData.uFlags = NIF_TIP;
-	Shell_NotifyIconW(NIM_MODIFY, &g_trayIconData);
+	swprintf_s(tooltip, L"LocalSourceControl | Backups today: %u | %s", count, isPaused ? L"Paused" : L"Active");
+	if (g_isInTray)
+	{
+		wcsncpy_s(g_trayIconData.szTip, tooltip, _TRUNCATE);
+		g_trayIconData.hIcon = isPaused && g_trayPausedIconHandle ? g_trayPausedIconHandle : g_trayIconHandle;
+		g_trayIconData.uFlags = NIF_TIP | NIF_ICON;
+		Shell_NotifyIconW(NIM_MODIFY, &g_trayIconData);
+	}
+	SetWindowTextW(g_hWnd, tooltip);
+	SendMessageW(g_hWnd, WM_SETICON, ICON_SMALL, (LPARAM)(isPaused ? g_trayPausedIconHandle : g_trayIconHandle));
+	SendMessageW(g_hWnd, WM_SETICON, ICON_BIG, (LPARAM)(isPaused ? g_appPausedIconHandle : g_appIconHandle));
 }
 
 static void TrayShowContextMenu(HWND windowHandle)

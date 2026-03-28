@@ -1,6 +1,7 @@
 #include "resource.h"
 
 IDI_APP_ICON               ICON                    "LocalSourceControl.ico"
+IDI_APP_ICON_PAUSED        ICON                    "LocalSourceControlPaused.ico"
 
 VS_VERSION_INFO VERSIONINFO
  FILEVERSION 1,0,4,0

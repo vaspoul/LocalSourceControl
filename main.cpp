@@ -10,6 +10,21 @@ using namespace std::chrono;
 
 typedef std::chrono::system_clock::time_point TimePoint;
 
+enum class DateFilterMode
+{
+	All,
+	Today,
+	DateTime,
+	DateRange,
+};
+
+struct DateFilterState
+{
+	DateFilterMode mode = DateFilterMode::All;
+	TimePoint rangeStart = {};
+	TimePoint rangeEnd = {};
+};
+
 struct BackupFile
 {
 	std::vector<TimePoint>	backups;
@@ -42,11 +57,10 @@ static std::mutex											g_historyMutex;
 struct HistoryEntry
 {
 	std::wstring originalPath;
-	std::wstring backupPath;
 	TimePoint timePoint = {};
 };
 
-static std::vector<HistoryEntry>							g_todayHistory;
+static std::vector<HistoryEntry>							g_filteredEntries;
 
 static std::mutex											g_watchersMutex;
 static std::vector<std::unique_ptr<FolderWatcher>>			g_watchers;
@@ -55,6 +69,9 @@ static std::atomic<uint32_t>								g_backupsToday;
 static std::wstring											g_todayPrefix;
 static std::atomic<bool>									g_isPaused;
 static std::atomic<uint64_t>								g_pauseUntilTick;
+static DateFilterState										g_backupDateFilter;
+static DateFilterState										g_historyDateFilter;
+static bool													g_modalWindowShowing = false;
 		
 // Sanitize "C:\foo\bar" -> "C\foo\bar" so it can be nested under backup root
 static std::wstring SanitizePathForBackup(const std::wstring& absolutePath)
@@ -219,6 +236,278 @@ static std::wstring MakeBackupPathFromTimePoint(const std::wstring& backupRoot, 
 	return (destinationDir / destinationFileName).wstring();
 }
 
+static int DaysInMonth(int year, int month)
+{
+	static const int daysPerMonth[12] = { 31,28,31,30,31,30,31,31,30,31,30,31 };
+	if (month < 1 || month > 12)
+	{
+		return 31;
+	}
+
+	if (month != 2)
+	{
+		return daysPerMonth[month - 1];
+	}
+
+	bool isLeap = ((year % 4 == 0) && (year % 100 != 0)) || (year % 400 == 0);
+	return isLeap ? 29 : 28;
+}
+
+static void ClampDateTimeParts(int& year, int& month, int& day, int& hour, int& minute, int& second)
+{
+	if (year < 1970) year = 1970;
+	if (year > 2100) year = 2100;
+	if (month < 1) month = 1;
+	if (month > 12) month = 12;
+	if (day < 1) day = 1;
+	int maxDay = DaysInMonth(year, month);
+	if (day > maxDay) day = maxDay;
+	if (hour < 0) hour = 0;
+	if (hour > 23) hour = 23;
+	if (minute < 0) minute = 0;
+	if (minute > 59) minute = 59;
+	if (second < 0) second = 0;
+	if (second > 59) second = 59;
+}
+
+static TimePoint MakeTimePointFromParts(int year, int month, int day, int hour, int minute, int second)
+{
+	ClampDateTimeParts(year, month, day, hour, minute, second);
+
+	tm tmv = {};
+	tmv.tm_year = year - 1900;
+	tmv.tm_mon = month - 1;
+	tmv.tm_mday = day;
+	tmv.tm_hour = hour;
+	tmv.tm_min = minute;
+	tmv.tm_sec = second;
+	tmv.tm_isdst = -1;
+
+	time_t tt = mktime(&tmv);
+	if (tt == (time_t)-1)
+	{
+		return TimePoint{};
+	}
+
+	return std::chrono::system_clock::from_time_t(tt);
+}
+
+static std::string FormatDateTimeText(const TimePoint& timePoint)
+{
+	auto tt = std::chrono::system_clock::to_time_t(timePoint);
+	tm tmv = {};
+	localtime_s(&tmv, &tt);
+
+	return fmt::format("{:02d}/{:02d}/{:04d} {:02d}:{:02d}:{:02d}",
+		tmv.tm_mday,
+		tmv.tm_mon + 1,
+		tmv.tm_year + 1900,
+		tmv.tm_hour,
+		tmv.tm_min,
+		tmv.tm_sec);
+}
+
+static bool DateFilterMatches(const DateFilterState& filter, const TimePoint& timePoint)
+{
+	TimePoint rangeStart = filter.rangeStart;
+	TimePoint rangeEnd = filter.rangeEnd;
+	if (filter.mode == DateFilterMode::DateRange && rangeEnd < rangeStart)
+	{
+		std::swap(rangeStart, rangeEnd);
+	}
+
+	return timePoint >= rangeStart && timePoint <= rangeEnd;
+}
+
+static bool AnyBackupMatchesDateFilter(const DateFilterState& filter, const BackupFile& entry)
+{
+	for (const TimePoint& timePoint : entry.backups)
+	{
+		if (DateFilterMatches(filter, timePoint))
+		{
+			return true;
+		}
+	}
+
+	return false;
+}
+
+static void RemoveFromFilteredEntries(const std::wstring& originalPath, const TimePoint& timePoint)
+{
+	std::lock_guard<std::mutex> lock(g_historyMutex);
+
+	g_filteredEntries.erase(
+		std::remove_if(g_filteredEntries.begin(), g_filteredEntries.end(), [&](const HistoryEntry& entry)
+		{
+			return entry.originalPath == originalPath && entry.timePoint == timePoint;
+		}),
+		g_filteredEntries.end());
+}
+
+static void InsertFilteredEntries(const std::wstring& originalPath, const TimePoint& timePoint)
+{
+	if (!DateFilterMatches(g_historyDateFilter, timePoint))
+	{
+		return;
+	}
+
+	HistoryEntry item = {};
+	item.originalPath = originalPath;
+	item.timePoint = timePoint;
+
+	std::lock_guard<std::mutex> lock(g_historyMutex);
+
+	auto insertIt = std::lower_bound(g_filteredEntries.begin(), g_filteredEntries.end(), timePoint,
+		[](const HistoryEntry& entry, const TimePoint& value)
+		{
+			return entry.timePoint > value;
+		});
+
+	g_filteredEntries.insert(insertIt, std::move(item));
+}
+
+static void RebuildFilteredEntries()
+{
+	std::vector<HistoryEntry> rebuilt;
+
+	{
+		std::shared_lock<std::shared_mutex> lock(g_indexMutex);
+
+		for (const BackupFile& entry : g_backupIndex)
+		{
+			for (const TimePoint& timePoint : entry.backups)
+			{
+				if (!DateFilterMatches(g_historyDateFilter, timePoint))
+				{
+					continue;
+				}
+
+				HistoryEntry item = {};
+				item.originalPath = entry.originalPath;
+				item.timePoint = timePoint;
+				rebuilt.push_back(std::move(item));
+			}
+		}
+	}
+
+	std::sort(rebuilt.begin(), rebuilt.end(), [](const HistoryEntry& left, const HistoryEntry& right)
+	{
+		return left.timePoint > right.timePoint;
+	});
+
+	{
+		std::lock_guard<std::mutex> lock(g_historyMutex);
+		g_filteredEntries = std::move(rebuilt);
+	}
+}
+
+static bool DrawDateTimeFieldsEditor(const char* label, TimePoint& timePoint, bool setToEndOfDay)
+{
+	const std::string displayText = FormatDateTimeText(timePoint);
+	bool changed = false;
+
+	ImGui::TextUnformatted(label);
+	ImGui::SameLine();
+	ImGui::PushID(label);
+	ImGui::SetNextItemWidth(210.0f);
+	ImGui::TextUnformatted(displayText.c_str());
+	ImGui::SameLine();
+	if (ImGui::Button("..."))
+	{
+		ImGui::OpenPopup("##calendar_popup");
+	}
+	g_modalWindowShowing |= ImGui::IsPopupOpen("##calendar_popup");
+
+	if (ImGui::DateTimePopup("##calendar_popup", timePoint, setToEndOfDay))
+	{
+		changed = true;
+	}
+
+	ImGui::PopID();
+	return changed;
+}
+
+static void DrawDateFilterControls(DateFilterState& filter)
+{
+	const char* modeLabels[] =
+	{
+		"All",
+		"Today",
+		"Date & Time",
+		"Date Range",
+	};
+
+	int modeValue = (int)filter.mode;
+	ImGui::TextUnformatted("Date filter:");
+	ImGui::SameLine();
+	ImGui::SetNextItemWidth(200.0f);
+	bool filterChanged = false;
+	if (ImGui::SliderInt("##date_filter_mode", &modeValue, 0, 3, modeLabels[modeValue]))
+	{
+		filter.mode = (DateFilterMode)modeValue;
+
+		TimePoint now = std::chrono::system_clock::now();
+		time_t tt = std::chrono::system_clock::to_time_t(now);
+		tm tmv = {};
+		localtime_s(&tmv, &tt);
+
+		if (filter.mode == DateFilterMode::Today)
+		{
+			filter.rangeStart = MakeTimePointFromParts(tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, 0, 0, 0);
+			filter.rangeEnd = MakeTimePointFromParts(tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, 23, 59, 59);
+		}
+		else if (filter.mode == DateFilterMode::DateTime)
+		{
+			filter.rangeEnd = MakeTimePointFromParts(tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, 23, 59, 59);
+		}
+		else if (filter.mode == DateFilterMode::DateRange)
+		{
+			filter.rangeStart = MakeTimePointFromParts(tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, 0, 0, 0);
+			filter.rangeEnd = MakeTimePointFromParts(tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, 23, 59, 59);
+		}
+		else
+		{
+			filter.rangeStart = TimePoint::min();
+			filter.rangeEnd = TimePoint::max();
+		}
+
+		filterChanged = true;
+	}
+
+	if (filter.mode == DateFilterMode::DateTime)
+	{
+		ImGui::SameLine();
+		if (DrawDateTimeFieldsEditor("On/After", filter.rangeStart, false))
+		{
+			filterChanged = true;
+		}
+	}
+	else if (filter.mode == DateFilterMode::DateRange)
+	{
+		ImGui::SameLine();
+		if (DrawDateTimeFieldsEditor("Start", filter.rangeStart, false))
+		{
+			filterChanged = true;
+		}
+		ImGui::SameLine();
+		if (DrawDateTimeFieldsEditor("End", filter.rangeEnd, true))
+		{
+			filterChanged = true;
+		}
+
+		if (filter.rangeEnd < filter.rangeStart)
+		{
+			std::swap(filter.rangeStart, filter.rangeEnd);
+			filterChanged = true;
+		}
+	}
+
+	if (filterChanged && &filter == &g_historyDateFilter)
+	{
+		RebuildFilteredEntries();
+	}
+}
+
 static std::wstring MakeBackupWildcardPath(const std::wstring& backupRoot, const std::wstring& originalFullPath)
 {
 	std::fs::path originalPath(originalFullPath);
@@ -267,79 +556,13 @@ static bool IsPaused()
 	{
 		g_pauseUntilTick.store(0, std::memory_order_relaxed);
 		g_isPaused.store(false, std::memory_order_relaxed);
+		TrayUpdateStatus(g_backupsToday, false);
 		return false;
 	}
 
 	return true;
 }
 
-static void RemoveFromTodayHistory(const std::wstring& originalPath, const TimePoint& timePoint)
-{
-	std::lock_guard<std::mutex> lock(g_historyMutex);
-
-	g_todayHistory.erase(
-		std::remove_if(g_todayHistory.begin(), g_todayHistory.end(), [&](const HistoryEntry& entry)
-		{
-			return entry.originalPath == originalPath && entry.timePoint == timePoint;
-		}),
-		g_todayHistory.end());
-}
-
-static void InsertTodayHistory(const std::wstring& originalPath, const TimePoint& timePoint)
-{
-	HistoryEntry item = {};
-	item.originalPath = originalPath;
-	item.timePoint = timePoint;
-	item.backupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, originalPath, timePoint);
-
-	std::lock_guard<std::mutex> lock(g_historyMutex);
-
-	auto insertIt = std::lower_bound(g_todayHistory.begin(), g_todayHistory.end(), timePoint,
-		[](const HistoryEntry& entry, const TimePoint& value)
-		{
-			return entry.timePoint > value;
-		});
-
-	g_todayHistory.insert(insertIt, std::move(item));
-
-}
-
-static void RebuildTodayHistory()
-{
-	std::vector<HistoryEntry> rebuilt;
-
-	{
-		std::shared_lock<std::shared_mutex> lock(g_indexMutex);
-
-		for (const BackupFile& entry : g_backupIndex)
-		{
-			for (const TimePoint& timePoint : entry.backups)
-			{
-				if (BuildTodayPrefixFromTimePoint(timePoint) != g_todayPrefix)
-				{
-					continue;
-				}
-
-				HistoryEntry item = {};
-				item.originalPath = entry.originalPath;
-				item.timePoint = timePoint;
-				item.backupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, entry.originalPath, timePoint);
-				rebuilt.push_back(std::move(item));
-			}
-		}
-	}
-
-	std::sort(rebuilt.begin(), rebuilt.end(), [](const HistoryEntry& left, const HistoryEntry& right)
-	{
-		return left.timePoint > right.timePoint;
-	});
-
-
-	{
-		std::lock_guard<std::mutex> lock(g_historyMutex);
-		g_todayHistory = std::move(rebuilt);
-	}
-}
 
 static BackupFile& GetOrCreateBackupEntry_Locked(const std::wstring& originalPath)
 {
@@ -535,7 +758,7 @@ static void EnforcePerFileLimit_Locked(BackupFile& entry, uint32_t maxBackupsPer
 		std::wstring oldestBackupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, entry.originalPath, oldestTimePoint);
 		std::error_code removeError;
 		std::fs::remove(std::fs::path(oldestBackupPath), removeError);
-		RemoveFromTodayHistory(entry.originalPath, oldestTimePoint);
+		RemoveFromFilteredEntries(entry.originalPath, oldestTimePoint);
 	}
 }
 
@@ -621,7 +844,7 @@ static void EnforceGlobalSizeLimit(const std::fs::path& backupRootPath, uint32_t
 					backups.end());
 			}
 		}
-		RemoveFromTodayHistory(originalPath, timePoint);
+		RemoveFromFilteredEntries(originalPath, timePoint);
 
 		if (removedFileSize > 0 && currentBytes >= removedFileSize)
 		{
@@ -672,11 +895,12 @@ static bool CopyToBackupAndIndex(const WatchedFolder& watchedFolder, const std::
 		EnforcePerFileLimit_Locked(entry, g_settings.maxBackupsPerFile);
 	}
 
+	InsertFilteredEntries(filePath, backupTimePoint);
+
 	if (destinationPath.find(g_todayPrefix) != std::wstring::npos)
 	{
-		InsertTodayHistory(filePath, backupTimePoint);
 		++g_backupsToday;
-		TrayUpdateBackupCount(g_backupsToday);
+		TrayUpdateStatus(g_backupsToday, g_isPaused.load(std::memory_order_relaxed));
 	}
 
 	EnforceGlobalSizeLimit(std::fs::path(g_settings.backupRoot), g_settings.maxBackupSizeMB);
@@ -771,9 +995,9 @@ static void ScanBackupFolder()
 	}
 
 	EnforceGlobalSizeLimit(std::fs::path(g_settings.backupRoot), g_settings.maxBackupSizeMB);
-	RebuildTodayHistory();
+	RebuildFilteredEntries();
 
-	TrayUpdateBackupCount(g_backupsToday);
+	TrayUpdateStatus(g_backupsToday, g_isPaused.load(std::memory_order_relaxed));
 }
 
 static bool SkipBackup(FolderWatcher& folderWatcher, const std::wstring& filePath, uint64_t nowTick)
@@ -1397,6 +1621,8 @@ static void UI_BackedUpFiles()
 		searchText.clear();
 	}
 
+	DrawDateFilterControls(g_backupDateFilter);
+
 	ImGui::Dummy(ImVec2(0,4));
 
 	bool isCtrlDown = ImGui::GetIO().KeyCtrl;
@@ -1404,8 +1630,9 @@ static void UI_BackedUpFiles()
 	bool isDiffPressed = isCtrlDown && ImGui::IsKeyPressed(ImGuiKey_D, false);
 	bool refreshRequested = ImGui::IsKeyPressed(ImGuiKey_F5, false);
 	bool deleteRequested = ImGui::IsKeyPressed(ImGuiKey_Delete, false);
-	bool deleteModalOpen = ImGui::IsPopupOpen("Delete Backups");
-	if (deleteModalOpen)
+	g_modalWindowShowing |= ImGui::IsPopupOpen("Delete Backups");
+
+	if (g_modalWindowShowing)
 	{
 		isCtrlDown = false;
 		isShiftDown = false;
@@ -1536,6 +1763,11 @@ static void UI_BackedUpFiles()
 						continue;
 					}
 
+					if (!AnyBackupMatchesDateFilter(g_backupDateFilter, entry))
+					{
+						continue;
+					}
+
 					if (!hasVisibleEntries)
 					{
 						firstVisibleItr = entryIt;
@@ -1573,11 +1805,11 @@ static void UI_BackedUpFiles()
 					{
 						ImGui::SetTooltip("%s", originalFolderUtf8.c_str());
 					}
-					if (!deleteModalOpen && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+					if (!g_modalWindowShowing && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 					{
 						OpenExplorerSelectPath(originalFolderWide);
 					}
-					if (!deleteModalOpen && ImGui::BeginPopupContextItem("folder_context"))
+					if (!g_modalWindowShowing && ImGui::BeginPopupContextItem("folder_context"))
 					{
 						if (ImGui::MenuItem("Show in Explorer"))
 						{
@@ -1593,7 +1825,7 @@ static void UI_BackedUpFiles()
 						ImGui::SetTooltip("%s", originalPathUtf8.c_str());
 					}
 
-					if (!deleteModalOpen && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+					if (!g_modalWindowShowing && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 					{
 						selectedOriginalPaths.clear();
 						selectedOriginalPaths.insert(entry.originalPath);
@@ -1602,7 +1834,7 @@ static void UI_BackedUpFiles()
 						selectedIsVisible = true;
 						OpenFileWithShell(entry.originalPath);
 					}
-					if (!deleteModalOpen && ImGui::BeginPopupContextItem("original_context"))
+					if (!g_modalWindowShowing && ImGui::BeginPopupContextItem("original_context"))
 					{
 						if (ImGui::MenuItem("Show in Explorer"))
 						{
@@ -1637,9 +1869,9 @@ static void UI_BackedUpFiles()
 						ImVec2 rowMin(windowPos.x + contentMin.x, rowMinY);
 						ImVec2 rowMax(windowPos.x + contentMax.x, rowMaxY);
 
-						bool isHovered = !deleteModalOpen && ImGui::IsMouseHoveringRect(rowMin, rowMax, false);
+						bool isHovered = !g_modalWindowShowing && ImGui::IsMouseHoveringRect(rowMin, rowMax, false);
 						bool isSelected = (selectedOriginalPaths.count(entry.originalPath));
-						if (!deleteModalOpen && isHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+						if (!g_modalWindowShowing && isHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
 						{
 							if (isCtrlDown)
 							{
@@ -1763,9 +1995,34 @@ static void UI_BackedUpFiles()
 						ImGui::TextDisabled("No backups available for selected file.");
 					}
 
-					if (!selectedEntry.backups.empty())
+					bool hasFilteredBackups = false;
+					for (const TimePoint& backupTimePoint : selectedEntry.backups)
 					{
-						latestBackupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, selectedEntry.originalPath, selectedEntry.backups.back());
+						if (DateFilterMatches(g_backupDateFilter, backupTimePoint))
+						{
+							hasFilteredBackups = true;
+							break;
+						}
+					}
+
+					if (!hasFilteredBackups)
+					{
+						selectedBackupPath.clear();
+						latestBackupPath.clear();
+						ImGui::TextDisabled("No backups in selected date filter.");
+					}
+
+					if (!selectedEntry.backups.empty() && hasFilteredBackups)
+					{
+						for (int backupIndex = (int)selectedEntry.backups.size() - 1; backupIndex >= 0; --backupIndex)
+						{
+							const TimePoint& backupTimePoint = selectedEntry.backups[backupIndex];
+							if (DateFilterMatches(g_backupDateFilter, backupTimePoint))
+							{
+								latestBackupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, selectedEntry.originalPath, backupTimePoint);
+								break;
+							}
+						}
 
 						if (ImGui::BeginTable("selected_file_backups_table", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_ScrollY))
 						{
@@ -1777,6 +2034,10 @@ static void UI_BackedUpFiles()
 							for (int backupIndex = (int)selectedEntry.backups.size() - 1; backupIndex >= 0; --backupIndex)
 							{
 								const TimePoint& backupTimePoint = selectedEntry.backups[backupIndex];
+								if (!DateFilterMatches(g_backupDateFilter, backupTimePoint))
+								{
+									continue;
+								}
 								std::wstring backupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, selectedEntry.originalPath, backupTimePoint);
 								std::wstring backupFileName = std::fs::path(backupPath).filename().wstring();
 								std::string backupFileNameUtf8 = WToUTF8(backupFileName);
@@ -1986,6 +2247,8 @@ static void UI_BackedUpFiles()
 
 	if (ImGui::BeginPopupModal("Delete Backups", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
 	{
+		g_modalWindowShowing = true;
+
 		if (ImGui::IsKeyPressed(ImGuiKey_Escape, false))
 		{
 			pendingDeleteBackupCount = 0;
@@ -2019,7 +2282,7 @@ static void UI_BackedUpFiles()
 						std::wstring backupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, (*entryItr).originalPath, timePoint);
 						std::error_code errorCode;
 						std::fs::remove(backupPath, errorCode);
-						RemoveFromTodayHistory((*entryItr).originalPath, timePoint);
+						RemoveFromFilteredEntries((*entryItr).originalPath, timePoint);
 					}
 
 					entryItr = g_backupIndex.erase(entryItr);
@@ -2062,16 +2325,19 @@ static void UI_History()
 	static int lastHistoryClickIndex = -1;
 	static size_t pendingDeleteCount = 0;
 
-	ImGui::Text("Today's operations (%d)", g_todayHistory.size());
+	ImGui::Text("History (%d)", g_filteredEntries.size());
 
 	ImGui::Separator();
+	DrawDateFilterControls(g_historyDateFilter);
+	ImGui::Dummy(ImVec2(0,4));
 
 	bool isCtrlDown = ImGui::GetIO().KeyCtrl;
 	bool isShiftDown = ImGui::GetIO().KeyShift;
 	bool isDiffPressed = isCtrlDown && ImGui::IsKeyPressed(ImGuiKey_D, false);
 	bool deleteRequested = ImGui::IsKeyPressed(ImGuiKey_Delete, false);
-	bool deleteModalOpen = ImGui::IsPopupOpen("Delete Backups");
-	if (deleteModalOpen)
+	g_modalWindowShowing |= ImGui::IsPopupOpen("Delete Backups");
+	
+	if (g_modalWindowShowing)
 	{
 		isCtrlDown = false;
 		isShiftDown = false;
@@ -2085,16 +2351,60 @@ static void UI_History()
 	{
 		std::lock_guard<std::mutex> lock(g_historyMutex);
 
-		if (selectedOperationIndex < 0 || selectedOperationIndex >= (int)g_todayHistory.size())
+		if (selectedOperationIndex < 0 || selectedOperationIndex >= (int)g_filteredEntries.size())
 		{
 			selectedOperationIndex = -1;
+		}
+
+		std::vector<int> visibleHistoryIndices;
+		visibleHistoryIndices.reserve(g_filteredEntries.size());
+		for (int idx = 0; idx < (int)g_filteredEntries.size(); ++idx)
+		{
+			if (DateFilterMatches(g_historyDateFilter, g_filteredEntries[idx].timePoint))
+			{
+				visibleHistoryIndices.push_back(idx);
+			}
+		}
+
+		if (!g_modalWindowShowing && !visibleHistoryIndices.empty())
+		{
+			bool moveUp = ImGui::IsKeyPressed(ImGuiKey_UpArrow, false);
+			bool moveDown = ImGui::IsKeyPressed(ImGuiKey_DownArrow, false);
+			if (moveUp || moveDown)
+			{
+				int targetVisibleIndex = -1;
+				if (lastHistoryClickIndex >= 0 && lastHistoryClickIndex < (int)visibleHistoryIndices.size())
+				{
+					targetVisibleIndex = lastHistoryClickIndex + (moveDown ? 1 : -1);
+				}
+				else
+				{
+					targetVisibleIndex = moveDown ? 0 : (int)visibleHistoryIndices.size() - 1;
+				}
+
+				if (targetVisibleIndex < 0)
+				{
+					targetVisibleIndex = 0;
+				}
+				else if (targetVisibleIndex >= (int)visibleHistoryIndices.size())
+				{
+					targetVisibleIndex = (int)visibleHistoryIndices.size() - 1;
+				}
+
+				int newOperationIndex = visibleHistoryIndices[targetVisibleIndex];
+				selectedOperationIndices.clear();
+				selectedOperationIndices.insert(newOperationIndex);
+				selectedOperationIndex = newOperationIndex;
+				lastHistoryClickIndex = targetVisibleIndex;
+			}
 		}
 
 		if (!selectedOperationIndices.empty())
 		{
 			for (auto it = selectedOperationIndices.begin(); it != selectedOperationIndices.end(); )
 			{
-				if (*it < 0 || *it >= (int)g_todayHistory.size())
+				if (*it < 0 || *it >= (int)g_filteredEntries.size() ||
+					!std::binary_search(visibleHistoryIndices.begin(), visibleHistoryIndices.end(), *it))
 				{
 					it = selectedOperationIndices.erase(it);
 				}
@@ -2107,17 +2417,17 @@ static void UI_History()
 
 		ImGui::PushStyleVar(ImGuiStyleVar_CellPadding, ImVec2(6.0f, 6.0f));
 
-		if (ImGui::BeginTable("ops", 4, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY))
+		if (ImGui::BeginTable("ops", 3, ImGuiTableFlags_RowBg | ImGuiTableFlags_Borders | ImGuiTableFlags_Resizable | ImGuiTableFlags_ScrollY))
 		{
 			ImGui::TableSetupColumn("Path");
 			ImGui::TableSetupColumn("Backup Time", ImGuiTableColumnFlags_WidthFixed, 160.0f);
-			ImGui::TableSetupColumn("Backup Path");
-			ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 260.0f);
+			ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 380.0f);
 			ImGui::TableHeadersRow();
 
-			for (int operationIndex = 0; operationIndex < (int)g_todayHistory.size(); ++operationIndex)
+			for (int visibleIndex = 0; visibleIndex < (int)visibleHistoryIndices.size(); ++visibleIndex)
 			{
-				const HistoryEntry& backupOperation = g_todayHistory[operationIndex];
+				int operationIndex = visibleHistoryIndices[visibleIndex];
+				const HistoryEntry& backupOperation = g_filteredEntries[operationIndex];
 
 				ImGui::PushID(operationIndex);
 
@@ -2135,7 +2445,7 @@ static void UI_History()
 						ImGui::SetTooltip("%s", originalUtf8.c_str());
 					}
 
-					if (!deleteModalOpen && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
+					if (!g_modalWindowShowing && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
 					{
 						selectedOperationIndex = operationIndex;
 						if (!backupOperation.originalPath.empty())
@@ -2144,7 +2454,7 @@ static void UI_History()
 						}
 					}
 
-					if (!deleteModalOpen && ImGui::BeginPopupContextItem("original_context"))
+					if (!g_modalWindowShowing && ImGui::BeginPopupContextItem("original_context"))
 					{
 						if (ImGui::MenuItem("Show in Explorer"))
 						{
@@ -2161,36 +2471,7 @@ static void UI_History()
 
 				ImGui::TableNextColumn();
 				{
-					std::string backupUtf8 = WToUTF8(backupOperation.backupPath);
-
-					ImGui::TextClickable("%s", backupUtf8.c_str());
-					if (ImGui::IsItemHovered())
-					{
-						ImGui::SetTooltip("%s", backupUtf8.c_str());
-					}
-
-					if (!deleteModalOpen && ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left))
-					{
-						selectedOperationIndex = operationIndex;
-						if (!backupOperation.backupPath.empty())
-						{
-							OpenFileWithShell(backupOperation.backupPath);
-						}
-					}
-
-					if (!deleteModalOpen && ImGui::BeginPopupContextItem("backup_context"))
-					{
-						if (ImGui::MenuItem("Show in Explorer"))
-						{
-							selectedOperationIndex = operationIndex;
-							OpenExplorerSelectPath(backupOperation.backupPath);
-						}
-						ImGui::EndPopup();
-					}
-				}
-
-				ImGui::TableNextColumn();
-				{
+					std::wstring backupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, backupOperation.originalPath, backupOperation.timePoint);
 					bool hasPrevious = false;
 					std::wstring previousBackupPath;
 					{
@@ -2226,7 +2507,7 @@ static void UI_History()
 					}
 					if (ImGui::Button("Diff Previous"))
 					{
-						LaunchDiffTool(g_settings.diffToolPath, previousBackupPath, backupOperation.backupPath);
+						LaunchDiffTool(g_settings.diffToolPath, previousBackupPath, backupPath);
 					}
 					if (!hasPrevious)
 					{
@@ -2236,7 +2517,13 @@ static void UI_History()
 					ImGui::SameLine();
 					if (ImGui::Button("Diff Current"))
 					{
-						LaunchDiffTool(g_settings.diffToolPath, backupOperation.backupPath, backupOperation.originalPath);
+						LaunchDiffTool(g_settings.diffToolPath, backupPath, backupOperation.originalPath);
+					}
+
+					ImGui::SameLine();
+					if (ImGui::Button("Show in Explorer"))
+					{
+						OpenExplorerSelectPath(backupPath);
 					}
 				}
 
@@ -2251,10 +2538,10 @@ static void UI_History()
 					ImVec2 rowMin(windowPos.x + contentMin.x, rowMinY);
 					ImVec2 rowMax(windowPos.x + contentMax.x, rowMaxY);
 
-					bool isHovered = !deleteModalOpen && ImGui::IsMouseHoveringRect(rowMin, rowMax, false);
+					bool isHovered = !g_modalWindowShowing && ImGui::IsMouseHoveringRect(rowMin, rowMax, false);
 					bool isSelected = (selectedOperationIndices.find(operationIndex) != selectedOperationIndices.end());
 
-					if (!deleteModalOpen && isHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
+					if (!g_modalWindowShowing && isHovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left))
 					{
 						if (isDiffPressed)
 						{
@@ -2263,11 +2550,11 @@ static void UI_History()
 
 						if (isShiftDown && lastHistoryClickIndex >= 0)
 						{
-							int rangeStart = std::min(lastHistoryClickIndex, operationIndex);
-							int rangeEnd = std::max(lastHistoryClickIndex, operationIndex);
+							int rangeStart = std::min(lastHistoryClickIndex, visibleIndex);
+							int rangeEnd = std::max(lastHistoryClickIndex, visibleIndex);
 							for (int idx = rangeStart; idx <= rangeEnd; ++idx)
 							{
-								selectedOperationIndices.insert(idx);
+								selectedOperationIndices.insert(visibleHistoryIndices[idx]);
 							}
 						}
 						else if (ImGui::GetIO().KeyCtrl)
@@ -2280,7 +2567,7 @@ static void UI_History()
 							selectedOperationIndices.insert(operationIndex);
 						}
 
-						lastHistoryClickIndex = operationIndex;
+						lastHistoryClickIndex = visibleIndex;
 						selectedOperationIndex = operationIndex;
 						isSelected = (selectedOperationIndices.find(operationIndex) != selectedOperationIndices.end());
 					}
@@ -2320,6 +2607,7 @@ static void UI_History()
 
 	if (ImGui::BeginPopupModal("Delete Backups", nullptr, ImGuiWindowFlags_AlwaysAutoResize))
 	{
+		g_modalWindowShowing = true;
 		ImGui::Text("Delete %zu history entries?", pendingDeleteCount);
 		ImGui::Separator();
 
@@ -2331,9 +2619,9 @@ static void UI_History()
 				std::lock_guard<std::mutex> lock(g_historyMutex);
 				for (int idx : selectedOperationIndices)
 				{
-					if (idx >= 0 && idx < (int)g_todayHistory.size())
+					if (idx >= 0 && idx < (int)g_filteredEntries.size())
 					{
-						entriesToDelete.push_back(g_todayHistory[idx]);
+						entriesToDelete.push_back(g_filteredEntries[idx]);
 					}
 				}
 			}
@@ -2363,7 +2651,8 @@ static void UI_History()
 			for (const auto& entry : entriesToDelete)
 			{
 				std::error_code errorCode;
-				std::fs::remove(entry.backupPath, errorCode);
+				std::wstring backupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, entry.originalPath, entry.timePoint);
+				std::fs::remove(backupPath, errorCode);
 			}
 
 			{
@@ -2371,9 +2660,9 @@ static void UI_History()
 				for (auto it = selectedOperationIndices.rbegin(); it != selectedOperationIndices.rend(); ++it)
 				{
 					int idx = *it;
-					if (idx >= 0 && idx < (int)g_todayHistory.size())
+					if (idx >= 0 && idx < (int)g_filteredEntries.size())
 					{
-						g_todayHistory.erase(g_todayHistory.begin() + idx);
+						g_filteredEntries.erase(g_filteredEntries.begin() + idx);
 					}
 				}
 			}
@@ -2397,6 +2686,7 @@ static void UI_History()
 
 	if (isDiffPressed && hasSelectedOperation)
 	{
+		std::wstring selectedBackupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, selectedOperationCopy.originalPath, selectedOperationCopy.timePoint);
 		bool hasPrevious = false;
 		std::wstring previousBackupPath;
 		{
@@ -2429,7 +2719,7 @@ static void UI_History()
 
 		if (hasPrevious)
 		{
-			LaunchDiffTool(g_settings.diffToolPath, previousBackupPath, selectedOperationCopy.backupPath);
+			LaunchDiffTool(g_settings.diffToolPath, previousBackupPath, selectedBackupPath);
 		}
 	}
 }
@@ -2627,6 +2917,14 @@ void AppInit()
 	localtime_s(&tmv, &tt);
 	g_todayPrefix = BuildTodayPrefixFromTimePoint(now);
 
+	g_backupDateFilter.mode = DateFilterMode::All;
+	g_backupDateFilter.rangeStart = TimePoint::min();
+	g_backupDateFilter.rangeEnd = TimePoint::max();
+
+	g_historyDateFilter.mode = DateFilterMode::Today;
+	g_historyDateFilter.rangeStart = MakeTimePointFromParts(tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, 0, 0, 0);
+	g_historyDateFilter.rangeEnd = MakeTimePointFromParts(tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, 23, 59, 59);
+
 	ScanBackupFolder();
 	StartWatchersFromSettings();
 }
@@ -2654,11 +2952,58 @@ bool AppLoop()
 		lastTodayPrefixCheck = GetTickCount64();
 	}
 
+	static uint64_t lastDateFilterCheck = 0;
+	static int lastDateStamp = -1;
+	if ((GetTickCount64() - lastDateFilterCheck) >= 60000)
+	{
+		using namespace std::chrono;
+		auto now = system_clock::now();
+		auto tt = system_clock::to_time_t(now);
+		tm tmv = {};
+		localtime_s(&tmv, &tt);
+
+		int dateStamp = (tmv.tm_year + 1900) * 10000 + (tmv.tm_mon + 1) * 100 + tmv.tm_mday;
+		if (dateStamp != lastDateStamp)
+		{
+			lastDateStamp = dateStamp;
+			bool historyFilterUpdated = false;
+			if (g_backupDateFilter.mode == DateFilterMode::Today)
+			{
+				g_backupDateFilter.rangeStart = MakeTimePointFromParts(tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, 0, 0, 0);
+				g_backupDateFilter.rangeEnd = MakeTimePointFromParts(tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, 23, 59, 59);
+			}
+			else if (g_backupDateFilter.mode == DateFilterMode::DateTime)
+			{
+				g_backupDateFilter.rangeEnd = MakeTimePointFromParts(tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, 23, 59, 59);
+			}
+
+			if (g_historyDateFilter.mode == DateFilterMode::Today)
+			{
+				g_historyDateFilter.rangeStart = MakeTimePointFromParts(tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, 0, 0, 0);
+				g_historyDateFilter.rangeEnd = MakeTimePointFromParts(tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, 23, 59, 59);
+				historyFilterUpdated = true;
+			}
+			else if (g_historyDateFilter.mode == DateFilterMode::DateTime)
+			{
+				g_historyDateFilter.rangeEnd = MakeTimePointFromParts(tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, 23, 59, 59);
+				historyFilterUpdated = true;
+			}
+
+			if (historyFilterUpdated)
+			{
+				RebuildFilteredEntries();
+			}
+		}
+
+		lastDateFilterCheck = GetTickCount64();
+	}
+
 	return false;
 }
 
 bool AppDraw()
 {
+	g_modalWindowShowing = false;
 	const float barHeight = 38.0f;
 	const float buttonHeight = 30.0f;
 	const float barSpacing = 6.0f;
@@ -2730,6 +3075,7 @@ bool AppDraw()
 			{
 				g_pauseUntilTick.store(0, std::memory_order_relaxed);
 				g_isPaused.store(true, std::memory_order_relaxed);
+				TrayUpdateStatus(g_backupsToday, true);
 			}
 
 			ImGui::SameLine();
@@ -2738,6 +3084,7 @@ bool AppDraw()
 				uint64_t durationMs = (uint64_t)g_settings.pauseMinutes * 60ull * 1000ull;
 				g_pauseUntilTick.store(GetTickCount64() + durationMs, std::memory_order_relaxed);
 				g_isPaused.store(true, std::memory_order_relaxed);
+				TrayUpdateStatus(g_backupsToday, true);
 			}
 		}
 		else
@@ -2752,6 +3099,7 @@ bool AppDraw()
 			{
 				g_pauseUntilTick.store(0, std::memory_order_relaxed);
 				g_isPaused.store(false, std::memory_order_relaxed);
+				TrayUpdateStatus(g_backupsToday, false);
 			}
 
 			ImGui::SameLine();

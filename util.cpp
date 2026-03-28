@@ -306,4 +306,302 @@ bool TextClickable(const std::wstring& text)
 	return TextClickable("%s", utf8Text.c_str());
 }
 
+bool DateTimePopup(const char* id, std::chrono::system_clock::time_point& timePoint, bool setToEndOfDay)
+{
+	bool changed = false;
+	if (!ImGui::BeginPopup(id))
+	{
+		return false;
+	}
+
+	const auto clamp = [](int value, const int minValue, const int maxValue) -> int
+	{
+			 if (value <= minValue)		return minValue;
+		else if (value >= maxValue)		return maxValue;
+		else							return value;
+	};
+
+	const auto daysInMonth = [&](int month, int year)
+	{
+		static const int daysPerMonth[12] = { 31,28,31,30,31,30,31,31,30,31,30,31 };
+
+		month = clamp(month, 1, 12);
+
+		if (month != 2)
+		{
+			return daysPerMonth[month - 1];
+		}
+
+		bool isLeap = ((year % 4 == 0) && (year % 100 != 0)) || (year % 400 == 0);
+
+		return isLeap ? 29 : 28;
+	};
+
+	const auto clampDateTime = [&](int* year, int* month, int* day, int* hour, int* minute, int* second)
+	{
+		*year	= clamp(*year, 1970, 2100);
+		*month	= clamp(*month, 1, 12);
+		*day	= clamp(*day, 1, daysInMonth(*month, *year));
+		*hour	= clamp(*hour, 0, 23);
+		*minute = clamp(*minute, 0, 59);
+		*second = clamp(*second, 0, 59);
+	};
+
+	ImGui::PushID(id);
+	int year;
+	int month;
+	int day;
+	int hour;
+	int minute;
+	int second;
+
+	{
+		auto tt = std::chrono::system_clock::to_time_t(timePoint);
+		tm tmv = {};
+		localtime_s(&tmv, &tt);
+		year = tmv.tm_year + 1900;
+		month = tmv.tm_mon + 1;
+		day = tmv.tm_mday;
+		hour = tmv.tm_hour;
+		minute = tmv.tm_min;
+		second = tmv.tm_sec;
+	}
+
+	static const char* monthNames[12] =	{ "January","February","March","April","May","June", "July","August","September","October","November","December" };
+
+	int monthIndex = clamp(month, 1, 12) - 1;
+	int yearValue = clamp(year, 1970, 2100);
+
+	ImGui::TextUnformatted("Date");
+	ImGui::SameLine();
+	ImGui::SetNextItemWidth(140.0f);
+	if (ImGui::Combo("##month", &monthIndex, monthNames, 12))
+	{
+		month = monthIndex + 1;
+		changed = true;
+	}
+	ImGui::SameLine();
+	ImGui::SetNextItemWidth(90.0f);
+	if (ImGui::BeginCombo("##year", std::to_string(yearValue).c_str()))
+	{
+		for (int y = 1970; y <= 2100; ++y)
+		{
+			bool isSelected = (y == yearValue);
+			if (ImGui::Selectable(std::to_string(y).c_str(), isSelected))
+			{
+				year = y;
+				changed = true;
+			}
+			if (isSelected)
+			{
+				ImGui::SetItemDefaultFocus();
+			}
+		}
+		ImGui::EndCombo();
+	}
+
+	ImGui::Separator();
+
+	int dayCount = daysInMonth(month, year);
+
+	int weekdaySundayBased;
+	int weekdayMondayBased;
+
+	{
+		tm tmv = {};
+		tmv.tm_year = year - 1900;
+		tmv.tm_mon = month - 1;
+		tmv.tm_mday = 1;
+		tmv.tm_isdst = -1;
+		mktime(&tmv);
+
+		weekdaySundayBased = tmv.tm_wday; // 0=Sun
+		weekdayMondayBased = (weekdaySundayBased + 6) % 7; // 0=Mon
+	}
+
+	if (ImGui::BeginTable("##calendar", 7, ImGuiTableFlags_SizingStretchSame))
+	{
+		ImGui::TableSetupColumn("Mon", ImGuiTableColumnFlags_WidthStretch);
+		ImGui::TableSetupColumn("Tue", ImGuiTableColumnFlags_WidthStretch);
+		ImGui::TableSetupColumn("Wed", ImGuiTableColumnFlags_WidthStretch);
+		ImGui::TableSetupColumn("Thu", ImGuiTableColumnFlags_WidthStretch);
+		ImGui::TableSetupColumn("Fri", ImGuiTableColumnFlags_WidthStretch);
+		ImGui::TableSetupColumn("Sat", ImGuiTableColumnFlags_WidthStretch);
+		ImGui::TableSetupColumn("Sun", ImGuiTableColumnFlags_WidthStretch);
+		ImGui::TableHeadersRow();
+
+		int dayNum = 1 - weekdayMondayBased;
+		for (int row = 0; row < 6; ++row)
+		{
+			ImGui::TableNextRow();
+			for (int col = 0; col < 7; ++col, ++dayNum)
+			{
+				ImGui::TableNextColumn();
+				if (dayNum < 1 || dayNum > dayCount)
+				{
+					ImGui::TextUnformatted(" ");
+					continue;
+				}
+
+				std::string label = std::to_string(dayNum);
+				float colWidth = ImGui::GetColumnWidth();
+				float textWidth = ImGui::CalcTextSize(label.c_str()).x;
+				float cursorX = ImGui::GetCursorPosX();
+				ImGui::SetCursorPosX(cursorX + (colWidth - textWidth) * 0.5f);
+
+				bool isSelected = (dayNum == day);
+				ImGui::PushID(dayNum);
+				if (ImGui::Selectable(label.c_str(), isSelected, ImGuiSelectableFlags_DontClosePopups, ImVec2(0.0f, 0.0f)))
+				{
+					day = dayNum;
+					changed = true;
+				}
+				ImGui::PopID();
+			}
+		}
+		ImGui::EndTable();
+	}
+
+	ImGui::Separator();
+	ImGui::TextUnformatted("Time (24h)");
+	ImGui::SameLine();
+	ImGui::SetNextItemWidth(40.0f);
+	if (ImGui::InputScalar("##hour", ImGuiDataType_S32, &hour, nullptr, nullptr, "%02d"))
+	{
+		changed = true;
+	}
+	ImGui::SameLine();
+	ImGui::TextUnformatted(":");
+	ImGui::SameLine();
+	ImGui::SetNextItemWidth(40.0f);
+	if (ImGui::InputScalar("##minute", ImGuiDataType_S32, &minute, nullptr, nullptr, "%02d"))
+	{
+		changed = true;
+	}
+	ImGui::SameLine();
+	ImGui::TextUnformatted(":");
+	ImGui::SameLine();
+	ImGui::SetNextItemWidth(40.0f);
+	if (ImGui::InputScalar("##second", ImGuiDataType_S32, &second, nullptr, nullptr, "%02d"))
+	{
+		changed = true;
+	}
+
+	ImGui::Separator();
+
+	if (ImGui::Button("<", ImVec2(40.0f, 0.0f)))
+	{
+		auto tt = std::chrono::system_clock::to_time_t(timePoint);
+		tm tmv = {};
+		localtime_s(&tmv, &tt);
+		tmv.tm_mday -= 1;
+		tmv.tm_isdst = -1;
+		time_t adjusted = mktime(&tmv);
+		if (adjusted != (time_t)-1)
+		{
+			timePoint = std::chrono::system_clock::from_time_t(adjusted);
+			auto adjustTt = std::chrono::system_clock::to_time_t(timePoint);
+			tm adjustTm = {};
+			localtime_s(&adjustTm, &adjustTt);
+			year = adjustTm.tm_year + 1900;
+			month = adjustTm.tm_mon + 1;
+			day = adjustTm.tm_mday;
+			hour = adjustTm.tm_hour;
+			minute = adjustTm.tm_min;
+			second = adjustTm.tm_sec;
+			changed = true;
+		}
+	}
+
+	ImGui::SameLine();
+
+	if (ImGui::Button("Today", ImVec2(80.0f, 0.0f)))
+	{
+		time_t now = time(nullptr);
+		tm tmvNow = {};
+		localtime_s(&tmvNow, &now);
+		year = tmvNow.tm_year + 1900;
+		month = tmvNow.tm_mon + 1;
+		day = tmvNow.tm_mday;
+		if (setToEndOfDay)
+		{
+			hour = 23;
+			minute = 59;
+			second = 59;
+		}
+		else
+		{
+			hour = 0;
+			minute = 0;
+			second = 0;
+		}
+		changed = true;
+	}
+
+	ImGui::SameLine();
+
+	if (ImGui::Button("Now", ImVec2(80.0f, 0.0f)))
+	{
+		time_t now = time(nullptr);
+		tm tmvNow = {};
+		localtime_s(&tmvNow, &now);
+		year = tmvNow.tm_year + 1900;
+		month = tmvNow.tm_mon + 1;
+		day = tmvNow.tm_mday;
+		hour = tmvNow.tm_hour;
+		minute = tmvNow.tm_min;
+		second = tmvNow.tm_sec;
+		changed = true;
+	}
+
+	ImGui::SameLine();
+
+	if (ImGui::Button(">", ImVec2(40.0f, 0.0f)))
+	{
+		auto tt = std::chrono::system_clock::to_time_t(timePoint);
+		tm tmv = {};
+		localtime_s(&tmv, &tt);
+		tmv.tm_mday += 1;
+		tmv.tm_isdst = -1;
+		time_t adjusted = mktime(&tmv);
+		if (adjusted != (time_t)-1)
+		{
+			timePoint = std::chrono::system_clock::from_time_t(adjusted);
+			auto adjustTt = std::chrono::system_clock::to_time_t(timePoint);
+			tm adjustTm = {};
+			localtime_s(&adjustTm, &adjustTt);
+			year = adjustTm.tm_year + 1900;
+			month = adjustTm.tm_mon + 1;
+			day = adjustTm.tm_mday;
+			hour = adjustTm.tm_hour;
+			minute = adjustTm.tm_min;
+			second = adjustTm.tm_sec;
+			changed = true;
+		}
+	}
+
+	clampDateTime(&year, &month, &day, &hour, &minute, &second);
+	ImGui::PopID();
+	ImGui::EndPopup();
+
+	if (changed)
+	{
+		tm tmv = {};
+		tmv.tm_year = year - 1900;
+		tmv.tm_mon = month - 1;
+		tmv.tm_mday = day;
+		tmv.tm_hour = hour;
+		tmv.tm_min = minute;
+		tmv.tm_sec = second;
+		tmv.tm_isdst = -1;
+		time_t tt = mktime(&tmv);
+		if (tt != (time_t)-1)
+		{
+			timePoint = std::chrono::system_clock::from_time_t(tt);
+		}
+	}
+
+	return changed;
+}
+
 } // namespace ImGui

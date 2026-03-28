@@ -2,6 +2,7 @@
 #define UTIL_H
 
 #include "imgui/imgui.h"
+#include <chrono>
 
 std::wstring				UTF8ToW(const std::string& s);
 std::string					WToUTF8(const std::wstring& s);
@@ -22,6 +23,7 @@ bool						InputTextMultilineStdString(const char* label, std::wstring& value, co
 void						HelpTooltip(const char* text);
 bool						TextClickable(const char* fmt, ...);
 bool						TextClickable(const std::wstring& text);
+bool						DateTimePopup(const char* id, std::chrono::system_clock::time_point& timePoint, bool setToEndOfDay);
 }
 
 #endif // UTIL_H
