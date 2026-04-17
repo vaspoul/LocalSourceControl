@@ -733,7 +733,7 @@ static uint64_t ComputeFolderSizeBytes(const std::fs::path& rootPath)
 	return totalBytes;
 }
 
-static void EnforcePerFileLimit_Locked(BackupFile& entry, uint32_t maxBackupsPerFile)
+static void EnforcePerFileLimit_Locked(BackupFile& entry, uint32_t maxBackupsPerFile, std::vector<HistoryEntry>& removedHistoryEntries)
 {
 	if (maxBackupsPerFile == 0)
 	{
@@ -758,7 +758,7 @@ static void EnforcePerFileLimit_Locked(BackupFile& entry, uint32_t maxBackupsPer
 		std::wstring oldestBackupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, entry.originalPath, oldestTimePoint);
 		std::error_code removeError;
 		std::fs::remove(std::fs::path(oldestBackupPath), removeError);
-		RemoveFromFilteredEntries(entry.originalPath, oldestTimePoint);
+		removedHistoryEntries.push_back(HistoryEntry{ entry.originalPath, oldestTimePoint });
 	}
 }
 
@@ -886,13 +886,19 @@ static bool CopyToBackupAndIndex(const WatchedFolder& watchedFolder, const std::
 		return false;
 	}
 
+	std::vector<HistoryEntry> removedHistoryEntries;
 	{
 		std::unique_lock<std::shared_mutex> lock(g_indexMutex);
 
 		BackupFile& entry = GetOrCreateBackupEntry_Locked(filePath);
 		entry.backups.push_back(backupTimePoint);
 		entry.SortBackupTimes();
-		EnforcePerFileLimit_Locked(entry, g_settings.maxBackupsPerFile);
+		EnforcePerFileLimit_Locked(entry, g_settings.maxBackupsPerFile, removedHistoryEntries);
+	}
+
+	for (const HistoryEntry& entry : removedHistoryEntries)
+	{
+		RemoveFromFilteredEntries(entry.originalPath, entry.timePoint);
 	}
 
 	InsertFilteredEntries(filePath, backupTimePoint);
@@ -984,14 +990,20 @@ static void ScanBackupFolder()
 		}
 	}
 
+	std::vector<HistoryEntry> removedHistoryEntries;
 	{
 		std::unique_lock<std::shared_mutex> lock(g_indexMutex);
 
 		for (BackupFile& entry : g_backupIndex)
 		{
 			entry.SortBackupTimes();
-			EnforcePerFileLimit_Locked(entry, g_settings.maxBackupsPerFile);
+			EnforcePerFileLimit_Locked(entry, g_settings.maxBackupsPerFile, removedHistoryEntries);
 		}
+	}
+
+	for (const HistoryEntry& entry : removedHistoryEntries)
+	{
+		RemoveFromFilteredEntries(entry.originalPath, entry.timePoint);
 	}
 
 	EnforceGlobalSizeLimit(std::fs::path(g_settings.backupRoot), g_settings.maxBackupSizeMB);
@@ -2325,7 +2337,13 @@ static void UI_History()
 	static int lastHistoryClickIndex = -1;
 	static size_t pendingDeleteCount = 0;
 
-	ImGui::Text("History (%d)", g_filteredEntries.size());
+	std::vector<HistoryEntry> historyEntries;
+	{
+		std::lock_guard<std::mutex> lock(g_historyMutex);
+		historyEntries = g_filteredEntries;
+	}
+
+	ImGui::Text("History (%d)", (int)historyEntries.size());
 
 	ImGui::Separator();
 	DrawDateFilterControls(g_historyDateFilter);
@@ -2348,23 +2366,20 @@ static void UI_History()
 	HistoryEntry selectedOperationCopy = {};
 	bool hasSelectedOperation = false;
 
+	if (selectedOperationIndex < 0 || selectedOperationIndex >= (int)historyEntries.size())
 	{
-		std::lock_guard<std::mutex> lock(g_historyMutex);
+		selectedOperationIndex = -1;
+	}
 
-		if (selectedOperationIndex < 0 || selectedOperationIndex >= (int)g_filteredEntries.size())
+	std::vector<int> visibleHistoryIndices;
+	visibleHistoryIndices.reserve(historyEntries.size());
+	for (int idx = 0; idx < (int)historyEntries.size(); ++idx)
+	{
+		if (DateFilterMatches(g_historyDateFilter, historyEntries[idx].timePoint))
 		{
-			selectedOperationIndex = -1;
+			visibleHistoryIndices.push_back(idx);
 		}
-
-		std::vector<int> visibleHistoryIndices;
-		visibleHistoryIndices.reserve(g_filteredEntries.size());
-		for (int idx = 0; idx < (int)g_filteredEntries.size(); ++idx)
-		{
-			if (DateFilterMatches(g_historyDateFilter, g_filteredEntries[idx].timePoint))
-			{
-				visibleHistoryIndices.push_back(idx);
-			}
-		}
+	}
 
 		if (!g_modalWindowShowing && !visibleHistoryIndices.empty())
 		{
@@ -2403,7 +2418,7 @@ static void UI_History()
 		{
 			for (auto it = selectedOperationIndices.begin(); it != selectedOperationIndices.end(); )
 			{
-				if (*it < 0 || *it >= (int)g_filteredEntries.size() ||
+				if (*it < 0 || *it >= (int)historyEntries.size() ||
 					!std::binary_search(visibleHistoryIndices.begin(), visibleHistoryIndices.end(), *it))
 				{
 					it = selectedOperationIndices.erase(it);
@@ -2427,7 +2442,7 @@ static void UI_History()
 			for (int visibleIndex = 0; visibleIndex < (int)visibleHistoryIndices.size(); ++visibleIndex)
 			{
 				int operationIndex = visibleHistoryIndices[visibleIndex];
-				const HistoryEntry& backupOperation = g_filteredEntries[operationIndex];
+				const HistoryEntry& backupOperation = historyEntries[operationIndex];
 
 				ImGui::PushID(operationIndex);
 
@@ -2597,7 +2612,6 @@ static void UI_History()
 		}
 
 		ImGui::PopStyleVar();
-	}
 
 	if (deleteRequested && !selectedOperationIndices.empty())
 	{
@@ -2615,14 +2629,11 @@ static void UI_History()
 		{
 			std::vector<HistoryEntry> entriesToDelete;
 			entriesToDelete.reserve(selectedOperationIndices.size());
+			for (int idx : selectedOperationIndices)
 			{
-				std::lock_guard<std::mutex> lock(g_historyMutex);
-				for (int idx : selectedOperationIndices)
+				if (idx >= 0 && idx < (int)historyEntries.size())
 				{
-					if (idx >= 0 && idx < (int)g_filteredEntries.size())
-					{
-						entriesToDelete.push_back(g_filteredEntries[idx]);
-					}
+					entriesToDelete.push_back(historyEntries[idx]);
 				}
 			}
 
@@ -2655,16 +2666,9 @@ static void UI_History()
 				std::fs::remove(backupPath, errorCode);
 			}
 
+			for (const auto& entry : entriesToDelete)
 			{
-				std::lock_guard<std::mutex> lock(g_historyMutex);
-				for (auto it = selectedOperationIndices.rbegin(); it != selectedOperationIndices.rend(); ++it)
-				{
-					int idx = *it;
-					if (idx >= 0 && idx < (int)g_filteredEntries.size())
-					{
-						g_filteredEntries.erase(g_filteredEntries.begin() + idx);
-					}
-				}
+				RemoveFromFilteredEntries(entry.originalPath, entry.timePoint);
 			}
 
 			selectedOperationIndices.clear();
