@@ -13,7 +13,9 @@ typedef std::chrono::system_clock::time_point TimePoint;
 enum class DateFilterMode
 {
 	All,
+	Yesterday,
 	Today,
+	ThisWeek,
 	DateTime,
 	DateRange,
 };
@@ -45,9 +47,6 @@ struct FolderWatcher
 	std::thread									workerThread;
 	HANDLE										directoryHandle = INVALID_HANDLE_VALUE;
 	std::atomic<bool>							stopRequested = false;
-
-	std::mutex									debounceMutex;
-	std::unordered_map<std::wstring, uint64_t>	lastEventTickByPath;
 };
 
 static std::shared_mutex									g_indexMutex;
@@ -292,6 +291,47 @@ static TimePoint MakeTimePointFromParts(int year, int month, int day, int hour, 
 	return std::chrono::system_clock::from_time_t(tt);
 }
 
+static void SetRelativeDayFilterRange(DateFilterState& filter, const tm& currentLocalTime, int dayOffset)
+{
+	tm selectedDay = currentLocalTime;
+	selectedDay.tm_mday += dayOffset;
+	selectedDay.tm_hour = 12;
+	selectedDay.tm_min = 0;
+	selectedDay.tm_sec = 0;
+	selectedDay.tm_isdst = -1;
+
+	time_t normalizedTime = mktime(&selectedDay);
+	if (normalizedTime == (time_t)-1)
+	{
+		return;
+	}
+
+	localtime_s(&selectedDay, &normalizedTime);
+	filter.rangeStart = MakeTimePointFromParts(selectedDay.tm_year + 1900, selectedDay.tm_mon + 1, selectedDay.tm_mday, 0, 0, 0);
+	filter.rangeEnd = MakeTimePointFromParts(selectedDay.tm_year + 1900, selectedDay.tm_mon + 1, selectedDay.tm_mday, 23, 59, 59);
+}
+
+static void SetCurrentWeekFilterRange(DateFilterState& filter, const tm& currentLocalTime)
+{
+	tm weekStart = currentLocalTime;
+	int daysSinceMonday = (weekStart.tm_wday + 6) % 7;
+	weekStart.tm_mday -= daysSinceMonday;
+	weekStart.tm_hour = 12;
+	weekStart.tm_min = 0;
+	weekStart.tm_sec = 0;
+	weekStart.tm_isdst = -1;
+
+	time_t normalizedTime = mktime(&weekStart);
+	if (normalizedTime == (time_t)-1)
+	{
+		return;
+	}
+
+	localtime_s(&weekStart, &normalizedTime);
+	filter.rangeStart = MakeTimePointFromParts(weekStart.tm_year + 1900, weekStart.tm_mon + 1, weekStart.tm_mday, 0, 0, 0);
+	filter.rangeEnd = MakeTimePointFromParts(currentLocalTime.tm_year + 1900, currentLocalTime.tm_mon + 1, currentLocalTime.tm_mday, 23, 59, 59);
+}
+
 static std::string FormatDateTimeText(const TimePoint& timePoint)
 {
 	auto tt = std::chrono::system_clock::to_time_t(timePoint);
@@ -432,7 +472,9 @@ static void DrawDateFilterControls(DateFilterState& filter)
 	const char* modeLabels[] =
 	{
 		"All",
+		"Yesterday",
 		"Today",
+		"This Week",
 		"Date & Time",
 		"Date Range",
 	};
@@ -442,7 +484,7 @@ static void DrawDateFilterControls(DateFilterState& filter)
 	ImGui::SameLine();
 	ImGui::SetNextItemWidth(200.0f);
 	bool filterChanged = false;
-	if (ImGui::SliderInt("##date_filter_mode", &modeValue, 0, 3, modeLabels[modeValue]))
+	if (ImGui::SliderInt("##date_filter_mode", &modeValue, 0, IM_ARRAYSIZE(modeLabels) - 1, modeLabels[modeValue]))
 	{
 		filter.mode = (DateFilterMode)modeValue;
 
@@ -451,10 +493,17 @@ static void DrawDateFilterControls(DateFilterState& filter)
 		tm tmv = {};
 		localtime_s(&tmv, &tt);
 
-		if (filter.mode == DateFilterMode::Today)
+		if (filter.mode == DateFilterMode::Yesterday)
 		{
-			filter.rangeStart = MakeTimePointFromParts(tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, 0, 0, 0);
-			filter.rangeEnd = MakeTimePointFromParts(tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, 23, 59, 59);
+			SetRelativeDayFilterRange(filter, tmv, -1);
+		}
+		else if (filter.mode == DateFilterMode::Today)
+		{
+			SetRelativeDayFilterRange(filter, tmv, 0);
+		}
+		else if (filter.mode == DateFilterMode::ThisWeek)
+		{
+			SetCurrentWeekFilterRange(filter, tmv);
 		}
 		else if (filter.mode == DateFilterMode::DateTime)
 		{
@@ -462,8 +511,7 @@ static void DrawDateFilterControls(DateFilterState& filter)
 		}
 		else if (filter.mode == DateFilterMode::DateRange)
 		{
-			filter.rangeStart = MakeTimePointFromParts(tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, 0, 0, 0);
-			filter.rangeEnd = MakeTimePointFromParts(tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, 23, 59, 59);
+			SetRelativeDayFilterRange(filter, tmv, 0);
 		}
 		else
 		{
@@ -1012,22 +1060,41 @@ static void ScanBackupFolder()
 	TrayUpdateStatus(g_backupsToday, g_isPaused.load(std::memory_order_relaxed));
 }
 
-static bool SkipBackup(FolderWatcher& folderWatcher, const std::wstring& filePath, uint64_t nowTick)
-{
-	std::lock_guard<std::mutex> lock(folderWatcher.debounceMutex);
+static constexpr uint64_t kBackupQuietPeriodMs = 500;
 
-	auto foundTick = folderWatcher.lastEventTickByPath.find(filePath);
-	if (foundTick != folderWatcher.lastEventTickByPath.end())
+static DWORD PendingBackupWaitTime(const std::unordered_map<std::wstring, uint64_t>& pendingBackupTicks, uint64_t nowTick)
+{
+	DWORD waitTime = INFINITE;
+
+	for (const auto& pendingBackup : pendingBackupTicks)
 	{
-		if (nowTick - foundTick->second < 500)
+		uint64_t elapsedMs = nowTick - pendingBackup.second;
+		if (elapsedMs >= kBackupQuietPeriodMs)
 		{
-			foundTick->second = nowTick;
-			return true;
+			return 0;
 		}
+
+		DWORD remainingMs = (DWORD)(kBackupQuietPeriodMs - elapsedMs);
+		waitTime = (std::min)(waitTime, remainingMs);
 	}
 
-	folderWatcher.lastEventTickByPath[filePath] = nowTick;
-	return false;
+	return waitTime;
+}
+
+static void CopySettledPendingBackups(const WatchedFolder& watchedFolder, std::unordered_map<std::wstring, uint64_t>& pendingBackupTicks, uint64_t nowTick)
+{
+	for (auto itr = pendingBackupTicks.begin(); itr != pendingBackupTicks.end();)
+	{
+		if (nowTick - itr->second < kBackupQuietPeriodMs)
+		{
+			++itr;
+			continue;
+		}
+
+		std::wstring filePath = itr->first;
+		itr = pendingBackupTicks.erase(itr);
+		CopyToBackupAndIndex(watchedFolder, filePath);
+	}
 }
 
 static void WatchThreadProc(FolderWatcher* watcher)
@@ -1040,7 +1107,7 @@ static void WatchThreadProc(FolderWatcher* watcher)
 		FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
 		nullptr,
 		OPEN_EXISTING,
-		FILE_FLAG_BACKUP_SEMANTICS,
+		FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OVERLAPPED,
 		nullptr);
 
 	if (watcher->directoryHandle == INVALID_HANDLE_VALUE)
@@ -1051,28 +1118,69 @@ static void WatchThreadProc(FolderWatcher* watcher)
 	DWORD notifyFlags = FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE;
 	std::vector<uint8_t> notifyBuffer;
 	notifyBuffer.resize(64 * 1024);
+	std::unordered_map<std::wstring, uint64_t> pendingBackupTicks;
+
+	OVERLAPPED overlapped = {};
+	overlapped.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+	if (overlapped.hEvent == nullptr)
+	{
+		CloseHandle(watcher->directoryHandle);
+		watcher->directoryHandle = INVALID_HANDLE_VALUE;
+		return;
+	}
 
 	while (!watcher->stopRequested.load())
 	{
+		ResetEvent(overlapped.hEvent);
 		DWORD bytesReturned = 0;
 
-		BOOL readSucceeded = ReadDirectoryChangesW(
+		BOOL readStarted = ReadDirectoryChangesW(
 			watcher->directoryHandle,
 			notifyBuffer.data(),
 			(DWORD)notifyBuffer.size(),
 			watchedFolder.includeSubfolders ? TRUE : FALSE,
 			notifyFlags,
-			&bytesReturned,
 			nullptr,
+			&overlapped,
 			nullptr);
 
-		if (!readSucceeded)
+		if (!readStarted && GetLastError() != ERROR_IO_PENDING)
 		{
-			if (!watcher->stopRequested.load())
+			break;
+		}
+
+		bool readCompleted = false;
+		while (!readCompleted && !watcher->stopRequested.load())
+		{
+			DWORD waitTime = PendingBackupWaitTime(pendingBackupTicks, GetTickCount64());
+			DWORD waitResult = WaitForSingleObject(overlapped.hEvent, waitTime);
+
+			if (waitResult == WAIT_TIMEOUT)
 			{
+				CopySettledPendingBackups(watchedFolder, pendingBackupTicks, GetTickCount64());
+				continue;
 			}
 
+			if (waitResult != WAIT_OBJECT_0 ||
+				!GetOverlappedResult(watcher->directoryHandle, &overlapped, &bytesReturned, FALSE))
+			{
+				readCompleted = false;
+				break;
+			}
+
+			readCompleted = true;
+		}
+
+		if (!readCompleted)
+		{
+			CancelIoEx(watcher->directoryHandle, &overlapped);
+			GetOverlappedResult(watcher->directoryHandle, &overlapped, &bytesReturned, TRUE);
 			break;
+		}
+
+		if (bytesReturned == 0)
+		{
+			continue;
 		}
 
 		uint64_t nowTick = GetTickCount64();
@@ -1095,10 +1203,7 @@ static void WatchThreadProc(FolderWatcher* watcher)
 				{
 					if (PassesFilters(watchedFolder, fullPath))
 					{
-						if (!SkipBackup(*watcher, fullPath, nowTick))
-						{
-							CopyToBackupAndIndex(watchedFolder, fullPath);
-						}
+						pendingBackupTicks[fullPath] = nowTick;
 					}
 				}
 			}
@@ -1110,8 +1215,11 @@ static void WatchThreadProc(FolderWatcher* watcher)
 
 			notifyInfo = (FILE_NOTIFY_INFORMATION*)((uint8_t*)notifyInfo + notifyInfo->NextEntryOffset);
 		}
+
+		CopySettledPendingBackups(watchedFolder, pendingBackupTicks, nowTick);
 	}
 
+	CloseHandle(overlapped.hEvent);
 	CloseHandle(watcher->directoryHandle);
 }
 
@@ -2926,8 +3034,7 @@ void AppInit()
 	g_backupDateFilter.rangeEnd = TimePoint::max();
 
 	g_historyDateFilter.mode = DateFilterMode::Today;
-	g_historyDateFilter.rangeStart = MakeTimePointFromParts(tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, 0, 0, 0);
-	g_historyDateFilter.rangeEnd = MakeTimePointFromParts(tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, 23, 59, 59);
+	SetRelativeDayFilterRange(g_historyDateFilter, tmv, 0);
 
 	ScanBackupFolder();
 	StartWatchersFromSettings();
@@ -2971,20 +3078,36 @@ bool AppLoop()
 		{
 			lastDateStamp = dateStamp;
 			bool historyFilterUpdated = false;
-			if (g_backupDateFilter.mode == DateFilterMode::Today)
+			if (g_backupDateFilter.mode == DateFilterMode::Yesterday)
 			{
-				g_backupDateFilter.rangeStart = MakeTimePointFromParts(tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, 0, 0, 0);
-				g_backupDateFilter.rangeEnd = MakeTimePointFromParts(tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, 23, 59, 59);
+				SetRelativeDayFilterRange(g_backupDateFilter, tmv, -1);
+			}
+			else if (g_backupDateFilter.mode == DateFilterMode::Today)
+			{
+				SetRelativeDayFilterRange(g_backupDateFilter, tmv, 0);
+			}
+			else if (g_backupDateFilter.mode == DateFilterMode::ThisWeek)
+			{
+				SetCurrentWeekFilterRange(g_backupDateFilter, tmv);
 			}
 			else if (g_backupDateFilter.mode == DateFilterMode::DateTime)
 			{
 				g_backupDateFilter.rangeEnd = MakeTimePointFromParts(tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, 23, 59, 59);
 			}
 
-			if (g_historyDateFilter.mode == DateFilterMode::Today)
+			if (g_historyDateFilter.mode == DateFilterMode::Yesterday)
 			{
-				g_historyDateFilter.rangeStart = MakeTimePointFromParts(tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, 0, 0, 0);
-				g_historyDateFilter.rangeEnd = MakeTimePointFromParts(tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday, 23, 59, 59);
+				SetRelativeDayFilterRange(g_historyDateFilter, tmv, -1);
+				historyFilterUpdated = true;
+			}
+			else if (g_historyDateFilter.mode == DateFilterMode::Today)
+			{
+				SetRelativeDayFilterRange(g_historyDateFilter, tmv, 0);
+				historyFilterUpdated = true;
+			}
+			else if (g_historyDateFilter.mode == DateFilterMode::ThisWeek)
+			{
+				SetCurrentWeekFilterRange(g_historyDateFilter, tmv);
 				historyFilterUpdated = true;
 			}
 			else if (g_historyDateFilter.mode == DateFilterMode::DateTime)
