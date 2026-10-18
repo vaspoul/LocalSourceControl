@@ -752,6 +752,49 @@ static void EnsureDirExists(const std::fs::path& directoryPath)
 	std::fs::create_directories(directoryPath, errorCode);
 }
 
+static bool MarkBackupReadOnly(const std::wstring& backupPath)
+{
+	DWORD attributes = GetFileAttributesW(backupPath.c_str());
+	if (attributes == INVALID_FILE_ATTRIBUTES)
+	{
+		return false;
+	}
+
+	if ((attributes & FILE_ATTRIBUTE_READONLY) != 0)
+	{
+		return true;
+	}
+
+	return SetFileAttributesW(backupPath.c_str(), attributes | FILE_ATTRIBUTE_READONLY) != FALSE;
+}
+
+static bool RemoveBackupFile(const std::wstring& backupPath)
+{
+	DWORD attributes = GetFileAttributesW(backupPath.c_str());
+	if (attributes == INVALID_FILE_ATTRIBUTES)
+	{
+		DWORD error = GetLastError();
+		return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND;
+	}
+
+	bool wasReadOnly = (attributes & FILE_ATTRIBUTE_READONLY) != 0;
+	if (wasReadOnly && !SetFileAttributesW(backupPath.c_str(), attributes & ~FILE_ATTRIBUTE_READONLY))
+	{
+		return false;
+	}
+
+	if (DeleteFileW(backupPath.c_str()))
+	{
+		return true;
+	}
+
+	if (wasReadOnly)
+	{
+		SetFileAttributesW(backupPath.c_str(), attributes);
+	}
+	return false;
+}
+
 static uint64_t ComputeFolderSizeBytes(const std::fs::path& rootPath)
 {
 	uint64_t totalBytes = 0;
@@ -804,8 +847,7 @@ static void EnforcePerFileLimit_Locked(BackupFile& entry, uint32_t maxBackupsPer
 		--validCount;
 
 		std::wstring oldestBackupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, entry.originalPath, oldestTimePoint);
-		std::error_code removeError;
-		std::fs::remove(std::fs::path(oldestBackupPath), removeError);
+		RemoveBackupFile(oldestBackupPath);
 		removedHistoryEntries.push_back(HistoryEntry{ entry.originalPath, oldestTimePoint });
 	}
 }
@@ -872,7 +914,7 @@ static void EnforceGlobalSizeLimit(const std::fs::path& backupRootPath, uint32_t
 			removedFileSize = (uint64_t)std::fs::file_size(backupPath, errorCode);
 		}
 
-		std::fs::remove(backupPath, errorCode);
+		RemoveBackupFile(backupPath);
 
 		{
 			std::unique_lock<std::shared_mutex> indexLock(g_indexMutex);
@@ -931,6 +973,11 @@ static bool CopyToBackupAndIndex(const WatchedFolder& watchedFolder, const std::
 	BOOL copySucceeded = CopyFileW(filePath.c_str(), destinationPath.c_str(), FALSE);
 	if (!copySucceeded)
 	{
+		return false;
+	}
+	if (!MarkBackupReadOnly(destinationPath))
+	{
+		RemoveBackupFile(destinationPath);
 		return false;
 	}
 
@@ -2400,8 +2447,7 @@ static void UI_BackedUpFiles()
 					for (const TimePoint& timePoint : entryItr->backups)
 					{
 						std::wstring backupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, (*entryItr).originalPath, timePoint);
-						std::error_code errorCode;
-						std::fs::remove(backupPath, errorCode);
+						RemoveBackupFile(backupPath);
 						RemoveFromFilteredEntries((*entryItr).originalPath, timePoint);
 					}
 
@@ -2769,9 +2815,8 @@ static void UI_History()
 
 			for (const auto& entry : entriesToDelete)
 			{
-				std::error_code errorCode;
 				std::wstring backupPath = MakeBackupPathFromTimePoint(g_settings.backupRoot, entry.originalPath, entry.timePoint);
-				std::fs::remove(backupPath, errorCode);
+				RemoveBackupFile(backupPath);
 			}
 
 			for (const auto& entry : entriesToDelete)
