@@ -100,8 +100,8 @@ jobs:
       shell: pwsh
       run: |
         $msg = (git log -1 --pretty=%s).Trim()
-        if ($msg -match '^v\d+\.\d+\.\d+$') {
-          $tag = $msg
+        if ($msg -match '^(v\d+\.\d+\.\d+)(?:\s+.*)?$') {
+          $tag = $Matches[1]
           $exists = git tag -l $tag
           if ($exists) {
             "match=false" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
